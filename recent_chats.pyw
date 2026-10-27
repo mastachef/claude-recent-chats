@@ -7,7 +7,7 @@ changes chats, groups or the Claude window.
 Run:  pythonw recent_chats.pyw          (pythonw = no console window)
       pythonw recent_chats.pyw --demo   (sample chats, for screenshots)
 """
-import ctypes, ctypes.wintypes as w, json, os, sys, threading, time
+import ctypes, ctypes.wintypes as w, json, math, os, sys, threading, time
 import tkinter as tk
 import tkinter.font as tkfont
 
@@ -18,6 +18,8 @@ SESSIONS = os.path.join(APPDATA, 'Claude', 'claude-code-sessions')
 CONFIG = os.path.join(APPDATA, 'Claude', 'claude_desktop_config.json')
 
 BG, ROW_HOVER, TEXT, DIM, ACCENT = '#1f1f1e', '#2c2c2a', '#e8e6e1', '#8f8d88', '#d97757'
+UNREAD = '#5ea0ff'    # dot: something new you haven't looked at (in progress = pulsing ACCENT)
+STALE_MS = 15 * 60000 # a 'running' chat with no activity this long is treated as stopped
 
 u = ctypes.windll.user32
 k = ctypes.windll.kernel32
@@ -82,6 +84,7 @@ def groups_from(cfg):
     return out
 
 
+DEMO_STATUS = {0: 'running', 2: 'unread', 5: 'unread'}   # row -> dot in --demo
 DEMO = [  # (minutes ago, title, group): shown with --demo, for screenshots
     (0, 'Landing page redesign', 'Website'), (2, 'Fix flaky checkout tests', 'Shop backend'),
     (9, 'Boss fight animations', 'Game'), (24, 'Weekly analytics report', 'Data'),
@@ -103,7 +106,7 @@ class Chats:
     def load(self):
         if '--demo' in sys.argv:
             now = time.time() * 1000
-            return [(now - m * 60000, f'demo-{i}', t, g) for i, (m, t, g) in enumerate(DEMO)]
+            return [(now - m * 60000, f'demo-{i}', t, g, DEMO_STATUS.get(i, '')) for i, (m, t, g) in enumerate(DEMO)]
         try:
             st = os.stat(CONFIG); stamp = (st.st_mtime_ns, st.st_size)
             if stamp != self.cfg_stamp:
@@ -123,8 +126,8 @@ class Chats:
                         old = self.files.get(e.path)
                         seen[e.path] = old if old and old[0] == stamp else (stamp, _parse(e.path))
         self.files = seen
-        chats = [(t, sid, title, self.groups.get(sid, '')) for _, entry in seen.values() if entry
-                 for t, sid, title in [entry]]
+        now = time.time() * 1000
+        chats = [(e[0], e[1], e[2], self.groups.get(e[1], ''), status(e, now)) for _, e in seen.values() if e]
         chats.sort(reverse=True)
         return chats[:SHOW]
 
@@ -145,7 +148,21 @@ def _parse(path):
         return None
     if d.get('isArchived') or not d.get('title'):
         return None
-    return (d.get('lastActivityAt') or 0, d['sessionId'], d['title'])
+    return (d.get('lastActivityAt') or 0, d['sessionId'], d['title'],
+            d.get('lastTurnEdgeAt') or 0, d.get('latestUserFrameAt') or 0, d.get('lastFocusedAt') or 0)
+
+
+def status(entry, now):
+    """'running' while Claude works in the chat, 'unread' if it did something since you last looked.
+
+    A turn is in progress while the last turn edge is the start of your latest message (the edge
+    moves past it when the turn ends). Matches the app's own running flag."""
+    activity, _, _, edge, user_frame, focused = entry
+    if user_frame and edge - user_frame < 2000 and now - activity < STALE_MS:
+        return 'running'
+    if activity > focused + 1000:
+        return 'unread'
+    return ''
 
 
 def fit(font, text, room):
@@ -194,9 +211,11 @@ class Panel:
         # One highlight rectangle that moves to the hovered row (40 row backgrounds doubled redraw time).
         self.highlight = self.canvas.create_rectangle(0, 0, 0, 0, fill=ROW_HOVER, width=0, state='hidden')
         self.items = [(self.canvas.create_text(0, 0, anchor='nw', fill=TEXT, font=self.title_font),
-                       self.canvas.create_text(0, 0, anchor='nw', fill=DIM, font=self.sub_font))
+                       self.canvas.create_text(0, 0, anchor='nw', fill=DIM, font=self.sub_font),
+                       self.canvas.create_oval(0, 0, 0, 0, width=0, state='hidden'))
                       for _ in range(SHOW)]
-        self.data = []          # (sid, title, sub) per drawn row
+        self.data = []          # (sid, title, sub, status) per drawn row
+        self.running_dots = []
         self.hover = -1
         self.wheel_pending, self.wheel_job = 0.0, None
         self.row_h = 1
@@ -209,6 +228,7 @@ class Panel:
         self.on_event = WinEventProc(self._event)   # kept on self so it isn't garbage-collected
         self.refresh()
         self.watch()
+        self.pulse()
 
     def open_chat(self, sid):
         if not sid or sid.startswith('demo-'):
@@ -218,7 +238,7 @@ class Panel:
 
     def refresh(self):
         chats = self.chats.load()
-        data = [(sid, title, f'{group or "Ungrouped"} · {ago(t)}') for t, sid, title, group in chats]
+        data = [(sid, title, f'{group or "Ungrouped"} · {ago(t)}', st) for t, sid, title, group, st in chats]
         if data != self.data:
             self.data = data
             self.draw_text()
@@ -230,25 +250,42 @@ class Panel:
         t_h, s_h = self.title_font.metrics('linespace'), self.sub_font.metrics('linespace')
         pad = max(4, t_h // 3)
         self.row_h = pad + t_h + s_h + pad
-        for i, (title, sub) in enumerate(self.items):
+        r = max(4, t_h // 5)
+        for i, (title, sub, dot) in enumerate(self.items):
             y = i * self.row_h
-            self.canvas.coords(title, 16, y + pad)
-            self.canvas.coords(sub, 16, y + pad + t_h)
+            self.canvas.coords(title, 24, y + pad)
+            self.canvas.coords(sub, 24, y + pad + t_h)
+            cy = y + pad + t_h // 2
+            self.canvas.coords(dot, 12 - r, cy - r, 12 + r, cy + r)
         self.hover = -2
         self._set_hover(-1)
         self.draw_text()
 
     def draw_text(self):
-        room = max(20, self.canvas.winfo_width() - 30)
-        for i, (title, sub) in enumerate(self.items):
+        room = max(20, self.canvas.winfo_width() - 38)
+        self.running_dots = []
+        for i, (title, sub, dot) in enumerate(self.items):
             if i < len(self.data):
-                _, t, s = self.data[i]
+                _, t, s, st = self.data[i]
                 self.canvas.itemconfigure(title, text=fit(self.title_font, t, room), state='normal')
                 self.canvas.itemconfigure(sub, text=fit(self.sub_font, s, room), state='normal')
+                if st == 'running':
+                    self.running_dots.append(dot)
+                self.canvas.itemconfigure(dot, state='normal' if st else 'hidden',
+                                          fill=ACCENT if st == 'running' else UNREAD)
             else:
-                self.canvas.itemconfigure(title, state='hidden')
-                self.canvas.itemconfigure(sub, state='hidden')
+                for item in (title, sub, dot):
+                    self.canvas.itemconfigure(item, state='hidden')
         self.canvas.configure(scrollregion=(0, 0, self.canvas.winfo_width(), len(self.data) * self.row_h))
+
+    def pulse(self):
+        """Gently pulse the in-progress dots (only those few items are touched)."""
+        if self.running_dots and not self.hidden:
+            k = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(time.time() * 4))
+            colour = '#%02x%02x%02x' % tuple(int(b + (a - b) * k) for a, b in ((0xd9, 0x1f), (0x77, 0x1f), (0x57, 0x1e)))
+            for dot in self.running_dots:
+                self.canvas.itemconfigure(dot, fill=colour)
+        self.root.after(80, self.pulse)
 
     def _row_at(self, event):
         i = int(self.canvas.canvasy(event.y) // self.row_h)
