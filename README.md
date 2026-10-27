@@ -7,7 +7,10 @@
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![No dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
 
-![The Recent chats panel docked to the left of the Claude desktop window](images/hero.png)
+<p align="center">
+  <img src="images/demo.gif" width="560" alt="13-second demo: the Recent chats panel slides out of the Claude window, lists every chat newest first with status dots, follows the window when it's dragged, and opens a chat on click">
+</p>
+<p align="center"><a href="promo/recent-chats-demo.mp4"><b>▶ Watch the demo with sound (13 s)</b></a><br><sub>Music: "Future Bass" by prettyjohn1 via Pixabay</sub></p>
 
 ## Why
 
@@ -22,6 +25,8 @@ This panel adds one, without changing anything in the app:
 - **Snaps to Claude's left edge** with no gap: it moves and resizes with the window and hides when Claude is minimised
 - **Read-only and offline**: it only reads Claude's files on your own computer, and sends nothing anywhere
 - **One file, no dependencies**: just Python's standard library
+
+![The Recent chats panel docked to the left of the Claude desktop window, with status dots](images/hero.png)
 
 ## Install
 

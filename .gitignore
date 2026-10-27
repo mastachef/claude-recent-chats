@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+promo/audio/
+promo/*-silent.mp4
+promo/*.py
