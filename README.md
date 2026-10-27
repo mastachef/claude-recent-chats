@@ -22,26 +22,51 @@ This panel adds one, without changing anything in the app:
 - **Read-only and offline**: it only reads Claude's files on your own computer, and sends nothing anywhere
 - **One file, no dependencies**: just Python's standard library
 
-## Quick start
+## Install
 
-1. Install [Python 3.9+](https://www.python.org/downloads/) (the python.org installer includes tkinter).
-2. Download [`recent_chats.pyw`](recent_chats.pyw).
-3. Double-click it, or run:
+### Easiest: ask Claude to do it
+
+Paste this into a Claude Code chat:
+
+```text
+Install Claude Recent Chats for me: https://github.com/mastachef/claude-recent-chats
+Follow the "Instructions for Claude" section in its README.
+```
+
+### Or one line in PowerShell
+
+```powershell
+irm https://raw.githubusercontent.com/mastachef/claude-recent-chats/main/install.ps1 | iex
+```
+
+The installer checks for Python, downloads the panel from the [latest release](https://github.com/mastachef/claude-recent-chats/releases/latest) into `%LOCALAPPDATA%\ClaudeRecentChats`, adds it to Windows startup and starts it. Run it again any time to update.
+
+You need [Python 3.9+](https://www.python.org/downloads/) (the python.org installer includes tkinter). If it's missing, the installer tells you how to get it.
+
+### Uninstall
+
+```powershell
+irm https://raw.githubusercontent.com/mastachef/claude-recent-chats/main/uninstall.ps1 | iex
+```
+
+This stops the panel, removes it from startup and deletes its folder. Your chats aren't touched.
+
+### Instructions for Claude
+
+If a user asks you to install this, follow these steps in order. Everything runs in PowerShell on the user's own Windows PC.
+
+1. **Check Python.** Run `py -3 -c "import sys, tkinter; print(sys.version)"`. If that fails, try `python` instead of `py -3`. If neither works or the version is below 3.9, ask the user before installing Python, then run `winget install -e --id Python.Python.3.12` and open a new shell.
+2. **Install.** Run `irm https://raw.githubusercontent.com/mastachef/claude-recent-chats/main/install.ps1 | iex`. It prints `[ok]` lines and ends with `Running.`
+3. **Verify.** Run `Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | Where-Object { $_.CommandLine -like '*recent_chats.pyw*' }`. One process should be listed. Then confirm the shortcut `Claude Recent Chats.lnk` exists in `[Environment]::GetFolderPath('Startup')`.
+4. **Tell the user** that the panel is on the left edge of their Claude window, that clicking a chat opens it, and that the ✕ closes it until the next sign-in. Don't take screenshots of their screen to check: it shows their private chat titles.
+
+Do not move or resize the user's Claude window, and don't edit Claude's own files. The panel only reads them.
+
+### Run it by hand
 
 ```bash
 pythonw recent_chats.pyw
 ```
-
-The panel appears next to your Claude window. Close it with the ✕ at the top.
-
-### Start it with Windows
-
-Press `Win + R`, type `shell:startup` and press Enter. In that folder, create a shortcut with:
-
-| Field | Value |
-| --- | --- |
-| Target | `pythonw.exe "C:\path\to\recent_chats.pyw"` |
-| Start in | the folder that holds `recent_chats.pyw` |
 
 ### Try it with sample data
 
@@ -69,9 +94,9 @@ BG, ROW_HOVER, TEXT, DIM, ACCENT = '#1f1f1e', '#2c2c2a', '#e8e6e1', '#8f8d88', '
 | Chat titles and last-used times | `%APPDATA%\Claude\claude-code-sessions\…\local_*.json` |
 | Sidebar groups | `%APPDATA%\Claude\claude_desktop_config.json` |
 | Opening a chat | the `claude://claude.ai/epitaxy/<session id>` link, which Windows hands to the Claude app |
-| Docking | the panel is an "owned" window of Claude's, so it stays just above it and hides with it. It snaps to Claude's visible edge and covers its 1-pixel border, so the two read as one window |
+| Docking | the panel keeps itself directly above the Claude window and hides when Claude is minimised. It snaps to Claude's visible edge and covers its 1-pixel border, so the two read as one window. It is deliberately not an "owned" window: owning a window from another program ties the two programs' input together and made dragging Claude laggy |
 
-It follows the Claude window through Windows move events, so it keeps up instantly. Every 2 seconds it checks for chat changes, re-reading only files that changed (about 8 ms), and updates rows in place.
+It follows the Claude window through Windows move events, so it keeps up instantly. Rows are drawn on a single canvas and wheel movement is applied once per frame, so fast scrolling stays smooth. Every 2 seconds it checks for chat changes, re-reading only files that changed (about 8 ms).
 
 ## FAQ
 

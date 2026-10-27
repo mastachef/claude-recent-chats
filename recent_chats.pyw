@@ -9,6 +9,7 @@ Run:  pythonw recent_chats.pyw          (pythonw = no console window)
 """
 import ctypes, ctypes.wintypes as w, json, os, sys, threading, time
 import tkinter as tk
+import tkinter.font as tkfont
 
 WIDTH = 270           # panel width at 100% display scaling
 SHOW = 40             # how many chats to list
@@ -27,9 +28,12 @@ except Exception:
     pass
 u.SetWindowLongPtrW.argtypes = [w.HWND, ctypes.c_int, ctypes.c_ssize_t]
 u.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+u.GetWindowLongPtrW.argtypes = [w.HWND, ctypes.c_int]
+u.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+u.GetWindow.restype = w.HWND
 
 # Windows events used to follow the Claude window the moment it moves (no polling lag).
-EVENT_MINIMIZESTART, EVENT_MINIMIZEEND, EVENT_LOCATIONCHANGE = 0x0016, 0x0017, 0x800B
+EVENT_FOREGROUND, EVENT_MINIMIZESTART, EVENT_MINIMIZEEND, EVENT_LOCATIONCHANGE = 0x0003, 0x0016, 0x0017, 0x800B
 WinEventProc = ctypes.WINFUNCTYPE(None, w.HANDLE, w.DWORD, w.HWND, w.LONG, w.LONG, w.DWORD, w.DWORD)
 u.SetWinEventHook.restype = w.HANDLE
 u.SetWinEventHook.argtypes = [w.DWORD, w.DWORD, w.HMODULE, WinEventProc, w.DWORD, w.DWORD, w.DWORD]
@@ -144,37 +148,21 @@ def _parse(path):
     return (d.get('lastActivityAt') or 0, d['sessionId'], d['title'])
 
 
+def fit(font, text, room):
+    """Cut text to fit `room` pixels, ending in an ellipsis."""
+    if font.measure(text) <= room:
+        return text
+    while text and font.measure(text + '…') > room:
+        text = text[:-1]
+    return text.rstrip() + '…'
+
+
 def ago(ms):
     m = max(0, int((time.time() * 1000 - ms) / 60000))
     if m < 1: return 'now'
     if m < 60: return f'{m}m'
     if m < 1440: return f'{m // 60}h'
     return f'{m // 1440}d'
-
-
-class Row:
-    """One list row, created once and reused: refreshes only change its text."""
-
-    def __init__(self, parent, on_click):
-        self.sid = None
-        self.frame = tk.Frame(parent, bg=BG, cursor='hand2')
-        self.title = tk.Label(self.frame, bg=BG, fg=TEXT, anchor='w', font=('Segoe UI', 10))
-        self.title.pack(fill='x', padx=8, pady=(5, 0))
-        self.sub = tk.Label(self.frame, bg=BG, fg=DIM, anchor='w', font=('Segoe UI', 8))
-        self.sub.pack(fill='x', padx=8, pady=(0, 5))
-        self.shown = ('', '')
-        parts = (self.frame, self.title, self.sub)
-        for p in parts:
-            p.bind('<Button-1>', lambda e: on_click(self.sid))
-            p.bind('<Enter>', lambda e: [q.configure(bg=ROW_HOVER) for q in parts])
-            p.bind('<Leave>', lambda e: [q.configure(bg=BG) for q in parts])
-
-    def set(self, sid, title, sub):
-        self.sid = sid
-        if (title, sub) != self.shown:
-            self.shown = (title, sub)
-            self.title.configure(text=title)
-            self.sub.configure(text=sub)
 
 
 class Panel:
@@ -184,6 +172,8 @@ class Panel:
         self.root.configure(bg=BG)
         self.root.update_idletasks()
         self.hwnd = u.GetAncestor(self.root.winfo_id(), 2)   # GA_ROOT: the real top-level window
+        # WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW: clicks never take focus from Claude, no taskbar button.
+        u.SetWindowLongPtrW(self.hwnd, -20, u.GetWindowLongPtrW(self.hwnd, -20) | 0x08000000 | 0x80)
         self.owner, self.owner_pid, self.hooks = None, 0, []
         self.last_rect = None
         self.hidden = False
@@ -196,15 +186,25 @@ class Panel:
         close.pack(side='right')
         close.bind('<Button-1>', lambda e: self.root.destroy())
 
-        self.canvas = tk.Canvas(self.root, bg=BG, highlightthickness=0, bd=0, yscrollincrement=24)
+        # Rows are drawn straight onto one canvas (no widget per row), so fast scrolling stays smooth.
+        self.canvas = tk.Canvas(self.root, bg=BG, highlightthickness=0, bd=0, yscrollincrement=8)
         self.canvas.pack(fill='both', expand=True)
-        self.list = tk.Frame(self.canvas, bg=BG)
-        self.canvas.create_window((0, 0), window=self.list, anchor='nw', tags='list')
-        self.canvas.bind('<Configure>', lambda e: self.canvas.itemconfigure('list', width=e.width))
-        self.list.bind('<Configure>', lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
-        self.root.bind_all('<MouseWheel>', lambda e: self.canvas.yview_scroll(-e.delta // 40, 'units'))
-        self.rows = [Row(self.list, self.open_chat) for _ in range(SHOW)]
-        self.packed = 0
+        self.title_font = tkfont.Font(family='Segoe UI', size=10)
+        self.sub_font = tkfont.Font(family='Segoe UI', size=8)
+        # One highlight rectangle that moves to the hovered row (40 row backgrounds doubled redraw time).
+        self.highlight = self.canvas.create_rectangle(0, 0, 0, 0, fill=ROW_HOVER, width=0, state='hidden')
+        self.items = [(self.canvas.create_text(0, 0, anchor='nw', fill=TEXT, font=self.title_font),
+                       self.canvas.create_text(0, 0, anchor='nw', fill=DIM, font=self.sub_font))
+                      for _ in range(SHOW)]
+        self.data = []          # (sid, title, sub) per drawn row
+        self.hover = -1
+        self.wheel_pending, self.wheel_job = 0.0, None
+        self.row_h = 1
+        self.canvas.bind('<Configure>', lambda e: self.layout())
+        self.canvas.bind('<Motion>', self._motion)
+        self.canvas.bind('<Leave>', lambda e: self._set_hover(-1))
+        self.canvas.bind('<Button-1>', lambda e: self._click(e))
+        self.root.bind_all('<MouseWheel>', self._wheel)
 
         self.on_event = WinEventProc(self._event)   # kept on self so it isn't garbage-collected
         self.refresh()
@@ -218,19 +218,97 @@ class Panel:
 
     def refresh(self):
         chats = self.chats.load()
-        for row, (t, sid, title, group) in zip(self.rows, chats):
-            row.set(sid, title, f'{group or "Ungrouped"} · {ago(t)}')
-        n = len(chats)
-        for i in range(self.packed, n):
-            self.rows[i].frame.pack(fill='x', padx=6)
-        for i in range(n, self.packed):
-            self.rows[i].frame.pack_forget()
-        self.packed = n
+        data = [(sid, title, f'{group or "Ungrouped"} · {ago(t)}') for t, sid, title, group in chats]
+        if data != self.data:
+            self.data = data
+            self.draw_text()
         self.root.after(2000, self.refresh)
 
+    def layout(self):
+        """Position every row for the current width and font size (on resize or DPI change)."""
+        w_ = self.canvas.winfo_width()
+        t_h, s_h = self.title_font.metrics('linespace'), self.sub_font.metrics('linespace')
+        pad = max(4, t_h // 3)
+        self.row_h = pad + t_h + s_h + pad
+        for i, (title, sub) in enumerate(self.items):
+            y = i * self.row_h
+            self.canvas.coords(title, 16, y + pad)
+            self.canvas.coords(sub, 16, y + pad + t_h)
+        self.hover = -2
+        self._set_hover(-1)
+        self.draw_text()
+
+    def draw_text(self):
+        room = max(20, self.canvas.winfo_width() - 30)
+        for i, (title, sub) in enumerate(self.items):
+            if i < len(self.data):
+                _, t, s = self.data[i]
+                self.canvas.itemconfigure(title, text=fit(self.title_font, t, room), state='normal')
+                self.canvas.itemconfigure(sub, text=fit(self.sub_font, s, room), state='normal')
+            else:
+                self.canvas.itemconfigure(title, state='hidden')
+                self.canvas.itemconfigure(sub, state='hidden')
+        self.canvas.configure(scrollregion=(0, 0, self.canvas.winfo_width(), len(self.data) * self.row_h))
+
+    def _row_at(self, event):
+        i = int(self.canvas.canvasy(event.y) // self.row_h)
+        return i if 0 <= i < len(self.data) else -1
+
+    def _set_hover(self, i):
+        if i == self.hover:
+            return
+        if i >= 0:
+            y = i * self.row_h
+            self.canvas.coords(self.highlight, 6, y, self.canvas.winfo_width() - 6, y + self.row_h)
+            self.canvas.itemconfigure(self.highlight, state='normal')
+        else:
+            self.canvas.itemconfigure(self.highlight, state='hidden')
+        self.hover = i
+        self.canvas.configure(cursor='hand2' if i >= 0 else '')
+
+    def _motion(self, event):
+        self._set_hover(self._row_at(event))
+
+    def _click(self, event):
+        i = self._row_at(event)
+        if i >= 0:
+            self.open_chat(self.data[i][0])
+
+    def _wheel(self, event):
+        # Add the wheel movement up and scroll once per screen frame: a fast spin sends events
+        # faster than a redraw takes, and scrolling on each one queued redraws (laggy catch-up).
+        self.wheel_pending += -event.delta / 40
+        if self.wheel_job is None:
+            self.wheel_job = self.root.after(16, self._apply_wheel)
+
+    def _apply_wheel(self):
+        self.wheel_job = None
+        steps = int(self.wheel_pending)
+        self.wheel_pending -= steps
+        top, bottom = self.canvas.yview()
+        if steps and not (top <= 0 and bottom >= 1):
+            self.canvas.yview_scroll(steps, 'units')
+            y = self.canvas.winfo_pointery() - self.canvas.winfo_rooty()
+            self._set_hover(self._row_at(type('E', (), {'y': y})))
+
     def _event(self, hook, event, hwnd, id_object, id_child, thread, ms):
-        if hwnd == self.owner and id_object == 0:   # OBJID_WINDOW: the Claude window itself
+        if event == EVENT_FOREGROUND:
+            self.stack()
+        elif hwnd == self.owner and id_object == 0:   # OBJID_WINDOW: the Claude window itself
             self.place()
+
+    def stack(self):
+        """Sit directly above the Claude window in the window stack.
+
+        Not an "owned" window: owning a window from another program ties the two programs'
+        input together, so Claude had to wait on this panel while being dragged."""
+        if not self.owner or self.hidden:
+            return
+        prev = u.GetWindow(self.owner, 3)          # GW_HWNDPREV: the window just above Claude
+        if prev == self.hwnd:
+            return
+        # SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE; after `prev` = just above Claude (0 = HWND_TOP)
+        u.SetWindowPos(self.hwnd, prev or 0, 0, 0, 0, 0, 0x13)
 
     def watch(self):
         """Find the Claude window (again, if it was closed or restarted) and hook its moves."""
@@ -240,13 +318,15 @@ class Panel:
             self.hooks = []
             self.owner, self.owner_pid = find_claude()
             if self.owner:
-                # Owned by Claude: stays just above it, hides when it's minimised.
-                u.SetWindowLongPtrW(self.hwnd, -8, self.owner)
                 self.root.tk.call('tk', 'scaling', (u.GetDpiForWindow(self.owner) or 96) / 72)
+                self.root.after_idle(self.layout)   # fonts changed size with the scaling
                 for lo, hi in ((EVENT_LOCATIONCHANGE, EVENT_LOCATIONCHANGE), (EVENT_MINIMIZESTART, EVENT_MINIMIZEEND)):
                     self.hooks.append(u.SetWinEventHook(lo, hi, None, self.on_event, self.owner_pid, 0, 0))
+                # Any program coming to the front: re-stack above Claude when Claude is involved.
+                self.hooks.append(u.SetWinEventHook(EVENT_FOREGROUND, EVENT_FOREGROUND, None, self.on_event, 0, 0, 2))
                 self.last_rect = None
         self.place()   # safety net in case an event was missed
+        self.stack()
         self.root.after(1000 if self.owner else 2000, self.watch)
 
     def place(self):
@@ -267,6 +347,7 @@ class Panel:
         self.last_rect = rect
         if self.hidden:
             self.root.deiconify(); self.hidden = False
+            self.stack()
         width = int(WIDTH * (u.GetDpiForWindow(self.owner) or 96) / 96)
         # +1 covers Claude's own 1px border so the two read as one window.
         # SWP_NOACTIVATE | SWP_NOZORDER: never steals focus or changes stacking.
