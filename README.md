@@ -1,56 +1,93 @@
 # Claude Recent Chats
 
-A small **Recent chats** panel that snaps to the left edge of the Claude desktop app on Windows.
+**A "Recent chats" panel for the Claude desktop app.** It snaps to the left edge of the Claude window and lists every Code chat you've used, newest first, from every sidebar group. Click one to jump back in.
 
-The Code tab's sidebar groups chats into folders, but has no list of the chats you used most recently across all groups. This panel adds one: every chat, newest first, with its sidebar group and how long ago you used it. Click a chat to open it.
+![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)
+![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776AB)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![No dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
 
-- Snaps to the Claude window's left edge, moves and resizes with it, and hides when Claude is minimised
-- Lists your 40 most recent chats from every group, updating every few seconds
-- Click a chat to open it in Claude
-- Read-only: it never changes your chats, groups or the Claude window
+![The Recent chats panel docked to the left of the Claude desktop window](images/hero.png)
 
-## Requirements
+## Why
 
-- Windows 10 or 11
-- The Claude desktop app (Code tab)
-- Python 3.9+ with tkinter (included in the python.org installer)
+Sidebar groups are great for keeping chats organised by project. But once you have a dozen groups and a few chats running at once, it's easy to lose track of the one you were in ten minutes ago. Claude's sidebar has no "recent" view across groups.
 
-## Run it
+This panel adds one, without changing anything in the app:
+
+- **Every chat, newest first**, whatever group it's in
+- **Its group and how long ago you used it** under each title (`Website · 2m`)
+- **Click to open** that chat in Claude
+- **Snaps to Claude's left edge** with no gap: it moves and resizes with the window and hides when Claude is minimised
+- **Read-only and offline**: it only reads Claude's files on your own computer, and sends nothing anywhere
+- **One file, no dependencies**: just Python's standard library
+
+## Quick start
+
+1. Install [Python 3.9+](https://www.python.org/downloads/) (the python.org installer includes tkinter).
+2. Download [`recent_chats.pyw`](recent_chats.pyw).
+3. Double-click it, or run:
 
 ```bash
 pythonw recent_chats.pyw
 ```
 
-`pythonw` runs it without a console window. Close it with the ✕ at the top of the panel.
+The panel appears next to your Claude window. Close it with the ✕ at the top.
 
 ### Start it with Windows
 
-Press `Win + R`, type `shell:startup`, press Enter, and put a shortcut there with:
+Press `Win + R`, type `shell:startup` and press Enter. In that folder, create a shortcut with:
 
-- Target: `pythonw.exe "C:\path\to\recent_chats.pyw"`
-- Start in: the folder that holds `recent_chats.pyw`
+| Field | Value |
+| --- | --- |
+| Target | `pythonw.exe "C:\path\to\recent_chats.pyw"` |
+| Start in | the folder that holds `recent_chats.pyw` |
 
-## How it works
+### Try it with sample data
 
-- Chat titles and last-used times come from the app's session files in `%APPDATA%\Claude\claude-code-sessions`.
-- Sidebar groups come from the app's settings in `%APPDATA%\Claude\claude_desktop_config.json`.
-- Clicking a chat opens `claude://claude.ai/epitaxy/<session id>`, which Windows hands to the Claude app.
-- The panel is owned by the Claude window, so it stays just above it and hides when it does. It snaps to the window's visible edge and covers its 1-pixel border, so the two look like one window.
+```bash
+pythonw recent_chats.pyw --demo
+```
 
-Nothing is sent anywhere; the panel only reads files on your own computer.
+This shows made-up chats instead of yours, like the screenshot above. It's handy for screenshots.
 
 ## Settings
 
-At the top of `recent_chats.pyw`:
+Change these at the top of `recent_chats.pyw`:
 
-- `WIDTH`: panel width (at 100% scaling)
-- `SHOW`: how many chats to list
-- `BG`, `TEXT`, `DIM`, `ROW_HOVER`: colours
+```python
+WIDTH = 270    # panel width at 100% display scaling
+SHOW = 40      # how many chats to list
 
-## Caveats
+BG, ROW_HOVER, TEXT, DIM, ACCENT = '#1f1f1e', '#2c2c2a', '#e8e6e1', '#8f8d88', '#d97757'
+```
 
-This is an unofficial tool, not made by Anthropic. It reads the desktop app's internal files, so an app update that changes them can break it until the panel is updated.
+## How it works
+
+| What | Where it comes from |
+| --- | --- |
+| Chat titles and last-used times | `%APPDATA%\Claude\claude-code-sessions\…\local_*.json` |
+| Sidebar groups | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Opening a chat | the `claude://claude.ai/epitaxy/<session id>` link, which Windows hands to the Claude app |
+| Docking | the panel is an "owned" window of Claude's, so it stays just above it and hides with it. It snaps to Claude's visible edge and covers its 1-pixel border, so the two read as one window |
+
+It checks for changes every 3 seconds and only redraws when something changed.
+
+## FAQ
+
+**Does it change my chats or settings?**
+No. It only reads files. Nothing is moved, renamed, pinned or grouped.
+
+**Mac or Linux?**
+Not yet: the docking uses Windows APIs. Pull requests are welcome.
+
+**It stopped working after a Claude update.**
+It reads the desktop app's internal files, which can change between versions. Please open an issue.
+
+## Disclaimer
+
+This is an unofficial community tool. It isn't made or endorsed by Anthropic.
 
 ## License
 
-MIT
+[MIT](LICENSE)

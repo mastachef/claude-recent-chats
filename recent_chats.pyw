@@ -5,8 +5,9 @@ Lists every Code chat, most recently used first, with its sidebar group. Click a
 changes chats, groups or the Claude window.
 
 Run:  pythonw recent_chats.pyw      (pythonw = no console window)
+      pythonw recent_chats.pyw --demo   (sample chats, for screenshots)
 """
-import ctypes, ctypes.wintypes as w, glob, json, os, time
+import ctypes, ctypes.wintypes as w, glob, json, os, sys, time
 import tkinter as tk
 
 WIDTH = 270           # panel width in physical pixels (scaled by the monitor's DPI below)
@@ -72,7 +73,20 @@ def load_groups():
     return out
 
 
+DEMO = [  # (minutes ago, title, group): shown with --demo, for screenshots
+    (0, 'Landing page redesign', 'Website'), (2, 'Fix flaky checkout tests', 'Shop backend'),
+    (9, 'Boss fight animations', 'Game'), (24, 'Weekly analytics report', 'Data'),
+    (51, 'Dark mode for settings', 'Website'), (95, 'Migrate to Postgres 17', 'Shop backend'),
+    (180, 'Level 3 lighting pass', 'Game'), (300, 'Onboarding email copy', 'Marketing'),
+    (720, 'Rate limiter bug', 'Shop backend'), (1500, 'Trailer shot list', 'Game'),
+    (2900, 'Pricing page A/B test', 'Website'), (4400, 'Sales dashboard', 'Data'),
+]
+
+
 def load_chats():
+    if '--demo' in sys.argv:
+        now = time.time() * 1000
+        return [(now - m * 60000, f'demo-{i}', t, g) for i, (m, t, g) in enumerate(DEMO)]
     groups = load_groups()
     chats = []
     for f in glob.glob(os.path.join(SESSIONS, '*', '*', 'local_*.json')):
@@ -126,6 +140,8 @@ class Panel:
         self.follow()
 
     def open_chat(self, sid):
+        if sid.startswith('demo-'):
+            return
         os.startfile(f'claude://claude.ai/epitaxy/{sid}')
 
     def refresh(self):
