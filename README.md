@@ -71,7 +71,7 @@ BG, ROW_HOVER, TEXT, DIM, ACCENT = '#1f1f1e', '#2c2c2a', '#e8e6e1', '#8f8d88', '
 | Opening a chat | the `claude://claude.ai/epitaxy/<session id>` link, which Windows hands to the Claude app |
 | Docking | the panel is an "owned" window of Claude's, so it stays just above it and hides with it. It snaps to Claude's visible edge and covers its 1-pixel border, so the two read as one window |
 
-It checks for changes every 3 seconds and only redraws when something changed.
+It follows the Claude window through Windows move events, so it keeps up instantly. Every 2 seconds it checks for chat changes, re-reading only files that changed (about 8 ms), and updates rows in place.
 
 ## FAQ
 

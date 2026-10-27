@@ -4,13 +4,13 @@ Lists every Code chat, most recently used first, with its sidebar group. Click a
 (uses the chat's claude:// link, which Windows hands to the Claude app). Read-only: it never
 changes chats, groups or the Claude window.
 
-Run:  pythonw recent_chats.pyw      (pythonw = no console window)
+Run:  pythonw recent_chats.pyw          (pythonw = no console window)
       pythonw recent_chats.pyw --demo   (sample chats, for screenshots)
 """
-import ctypes, ctypes.wintypes as w, glob, json, os, sys, time
+import ctypes, ctypes.wintypes as w, json, os, sys, threading, time
 import tkinter as tk
 
-WIDTH = 270           # panel width in physical pixels (scaled by the monitor's DPI below)
+WIDTH = 270           # panel width at 100% display scaling
 SHOW = 40             # how many chats to list
 APPDATA = os.environ['APPDATA']
 SESSIONS = os.path.join(APPDATA, 'Claude', 'claude-code-sessions')
@@ -20,16 +20,23 @@ BG, ROW_HOVER, TEXT, DIM, ACCENT = '#1f1f1e', '#2c2c2a', '#e8e6e1', '#8f8d88', '
 
 u = ctypes.windll.user32
 k = ctypes.windll.kernel32
+dwm = ctypes.windll.dwmapi
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)   # per-monitor: window rects in real pixels
 except Exception:
     pass
-u.GetWindowLongPtrW.restype = ctypes.c_ssize_t
 u.SetWindowLongPtrW.argtypes = [w.HWND, ctypes.c_int, ctypes.c_ssize_t]
+u.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+
+# Windows events used to follow the Claude window the moment it moves (no polling lag).
+EVENT_MINIMIZESTART, EVENT_MINIMIZEEND, EVENT_LOCATIONCHANGE = 0x0016, 0x0017, 0x800B
+WinEventProc = ctypes.WINFUNCTYPE(None, w.HANDLE, w.DWORD, w.HWND, w.LONG, w.LONG, w.DWORD, w.DWORD)
+u.SetWinEventHook.restype = w.HANDLE
+u.SetWinEventHook.argtypes = [w.DWORD, w.DWORD, w.HMODULE, WinEventProc, w.DWORD, w.DWORD, w.DWORD]
 
 
 def find_claude():
-    """The Claude app's main window (largest visible claude.exe window), or None."""
+    """The Claude app's main window (largest claude.exe top-level window) and its process id."""
     best = []
 
     def cb(h, _):
@@ -41,20 +48,15 @@ def find_claude():
         k.QueryFullProcessImageNameW(hp, 0, exe, ctypes.byref(sz)); k.CloseHandle(hp)
         if os.path.basename(exe.value).lower() == 'claude.exe':
             r = w.RECT(); u.GetWindowRect(h, ctypes.byref(r))
-            best.append(((r.right - r.left) * (r.bottom - r.top), h))
+            best.append(((r.right - r.left) * (r.bottom - r.top), h, pid.value))
         return True
 
     u.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, w.HWND, w.LPARAM)(cb), 0)
-    return max(best)[1] if best else None
+    return max(best)[1:] if best else (None, 0)
 
 
-def load_groups():
+def groups_from(cfg):
     """sessionId -> group name, from the app's sidebar settings."""
-    try:
-        cfg = json.load(open(CONFIG, encoding='utf-8'))
-        scopes = cfg['preferences']['epitaxyPrefs']['dframe-group-scopes']
-    except Exception:
-        return {}
     out = {}
 
     def walk(node):
@@ -69,7 +71,10 @@ def load_groups():
         for v in node.values():
             walk(v)
 
-    walk(scopes)
+    try:
+        walk(cfg['preferences']['epitaxyPrefs']['dframe-group-scopes'])
+    except Exception:
+        pass
     return out
 
 
@@ -83,23 +88,60 @@ DEMO = [  # (minutes ago, title, group): shown with --demo, for screenshots
 ]
 
 
-def load_chats():
-    if '--demo' in sys.argv:
-        now = time.time() * 1000
-        return [(now - m * 60000, f'demo-{i}', t, g) for i, (m, t, g) in enumerate(DEMO)]
-    groups = load_groups()
-    chats = []
-    for f in glob.glob(os.path.join(SESSIONS, '*', '*', 'local_*.json')):
+class Chats:
+    """Reads chat files, re-parsing only the ones whose size or modified time changed."""
+
+    def __init__(self):
+        self.files = {}               # path -> ((mtime_ns, size), entry or None)
+        self.cfg_stamp = None
+        self.groups = {}
+
+    def load(self):
+        if '--demo' in sys.argv:
+            now = time.time() * 1000
+            return [(now - m * 60000, f'demo-{i}', t, g) for i, (m, t, g) in enumerate(DEMO)]
         try:
-            d = json.load(open(f, encoding='utf-8'))
+            st = os.stat(CONFIG); stamp = (st.st_mtime_ns, st.st_size)
+            if stamp != self.cfg_stamp:
+                self.cfg_stamp = stamp
+                with open(CONFIG, encoding='utf-8') as f:
+                    self.groups = groups_from(json.load(f))
         except Exception:
-            continue
-        if d.get('isArchived') or not d.get('title'):
-            continue
-        sid = d['sessionId']
-        chats.append((d.get('lastActivityAt') or 0, sid, d['title'], groups.get(sid, '')))
-    chats.sort(reverse=True)
-    return chats[:SHOW]
+            pass
+        seen = {}
+        for org in _dirs(SESSIONS):
+            for acct in _dirs(org):
+                with os.scandir(acct) as it:
+                    for e in it:
+                        if not (e.name.startswith('local_') and e.name.endswith('.json')):
+                            continue
+                        st = e.stat(); stamp = (st.st_mtime_ns, st.st_size)
+                        old = self.files.get(e.path)
+                        seen[e.path] = old if old and old[0] == stamp else (stamp, _parse(e.path))
+        self.files = seen
+        chats = [(t, sid, title, self.groups.get(sid, '')) for _, entry in seen.values() if entry
+                 for t, sid, title in [entry]]
+        chats.sort(reverse=True)
+        return chats[:SHOW]
+
+
+def _dirs(path):
+    try:
+        with os.scandir(path) as it:
+            return [e.path for e in it if e.is_dir()]
+    except OSError:
+        return []
+
+
+def _parse(path):
+    try:
+        with open(path, encoding='utf-8') as f:
+            d = json.load(f)
+    except Exception:
+        return None
+    if d.get('isArchived') or not d.get('title'):
+        return None
+    return (d.get('lastActivityAt') or 0, d['sessionId'], d['title'])
 
 
 def ago(ms):
@@ -110,6 +152,31 @@ def ago(ms):
     return f'{m // 1440}d'
 
 
+class Row:
+    """One list row, created once and reused: refreshes only change its text."""
+
+    def __init__(self, parent, on_click):
+        self.sid = None
+        self.frame = tk.Frame(parent, bg=BG, cursor='hand2')
+        self.title = tk.Label(self.frame, bg=BG, fg=TEXT, anchor='w', font=('Segoe UI', 10))
+        self.title.pack(fill='x', padx=8, pady=(5, 0))
+        self.sub = tk.Label(self.frame, bg=BG, fg=DIM, anchor='w', font=('Segoe UI', 8))
+        self.sub.pack(fill='x', padx=8, pady=(0, 5))
+        self.shown = ('', '')
+        parts = (self.frame, self.title, self.sub)
+        for p in parts:
+            p.bind('<Button-1>', lambda e: on_click(self.sid))
+            p.bind('<Enter>', lambda e: [q.configure(bg=ROW_HOVER) for q in parts])
+            p.bind('<Leave>', lambda e: [q.configure(bg=BG) for q in parts])
+
+    def set(self, sid, title, sub):
+        self.sid = sid
+        if (title, sub) != self.shown:
+            self.shown = (title, sub)
+            self.title.configure(text=title)
+            self.sub.configure(text=sub)
+
+
 class Panel:
     def __init__(self):
         self.root = tk.Tk()
@@ -117,9 +184,10 @@ class Panel:
         self.root.configure(bg=BG)
         self.root.update_idletasks()
         self.hwnd = u.GetAncestor(self.root.winfo_id(), 2)   # GA_ROOT: the real top-level window
-        self.owner = None
+        self.owner, self.owner_pid, self.hooks = None, 0, []
         self.last_rect = None
-        self.signature = None
+        self.hidden = False
+        self.chats = Chats()
 
         head = tk.Frame(self.root, bg=BG)
         head.pack(fill='x', padx=12, pady=(10, 4))
@@ -128,74 +196,81 @@ class Panel:
         close.pack(side='right')
         close.bind('<Button-1>', lambda e: self.root.destroy())
 
-        self.canvas = tk.Canvas(self.root, bg=BG, highlightthickness=0, bd=0)
+        self.canvas = tk.Canvas(self.root, bg=BG, highlightthickness=0, bd=0, yscrollincrement=24)
         self.canvas.pack(fill='both', expand=True)
         self.list = tk.Frame(self.canvas, bg=BG)
         self.canvas.create_window((0, 0), window=self.list, anchor='nw', tags='list')
         self.canvas.bind('<Configure>', lambda e: self.canvas.itemconfigure('list', width=e.width))
         self.list.bind('<Configure>', lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
-        self.root.bind_all('<MouseWheel>', lambda e: self.canvas.yview_scroll(-e.delta // 120, 'units'))
+        self.root.bind_all('<MouseWheel>', lambda e: self.canvas.yview_scroll(-e.delta // 40, 'units'))
+        self.rows = [Row(self.list, self.open_chat) for _ in range(SHOW)]
+        self.packed = 0
 
+        self.on_event = WinEventProc(self._event)   # kept on self so it isn't garbage-collected
         self.refresh()
-        self.follow()
+        self.watch()
 
     def open_chat(self, sid):
-        if sid.startswith('demo-'):
+        if not sid or sid.startswith('demo-'):
             return
-        os.startfile(f'claude://claude.ai/epitaxy/{sid}')
+        # Off the UI thread: opening the link can take a moment and must not freeze the panel.
+        threading.Thread(target=os.startfile, args=(f'claude://claude.ai/epitaxy/{sid}',), daemon=True).start()
 
     def refresh(self):
-        chats = load_chats()
-        sig = [(c[1], c[2], c[3], ago(c[0])) for c in chats]
-        if sig != self.signature:                 # only redraw when something changed
-            self.signature = sig
-            for child in self.list.winfo_children():
-                child.destroy()
-            for _, sid, title, group, when in [(c[0],) + s for c, s in zip(chats, sig)]:
-                self.add_row(sid, title, group, when)
-        self.root.after(3000, self.refresh)
+        chats = self.chats.load()
+        for row, (t, sid, title, group) in zip(self.rows, chats):
+            row.set(sid, title, f'{group or "Ungrouped"} · {ago(t)}')
+        n = len(chats)
+        for i in range(self.packed, n):
+            self.rows[i].frame.pack(fill='x', padx=6)
+        for i in range(n, self.packed):
+            self.rows[i].frame.pack_forget()
+        self.packed = n
+        self.root.after(2000, self.refresh)
 
-    def add_row(self, sid, title, group, when):
-        row = tk.Frame(self.list, bg=BG, cursor='hand2')
-        row.pack(fill='x', padx=6)
-        t = tk.Label(row, text=title, bg=BG, fg=TEXT, anchor='w', font=('Segoe UI', 10))
-        t.pack(fill='x', padx=8, pady=(5, 0))
-        s = tk.Label(row, text=f'{group or "Ungrouped"} · {when}', bg=BG, fg=DIM, anchor='w', font=('Segoe UI', 8))
-        s.pack(fill='x', padx=8, pady=(0, 5))
-        parts = (row, t, s)
-        for p in parts:
-            p.bind('<Button-1>', lambda e, i=sid: self.open_chat(i))
-            p.bind('<Enter>', lambda e: [q.configure(bg=ROW_HOVER) for q in parts])
-            p.bind('<Leave>', lambda e: [q.configure(bg=BG) for q in parts])
+    def _event(self, hook, event, hwnd, id_object, id_child, thread, ms):
+        if hwnd == self.owner and id_object == 0:   # OBJID_WINDOW: the Claude window itself
+            self.place()
 
-    def follow(self):
-        """Keep the panel glued to the left edge of the Claude window (only moves itself)."""
+    def watch(self):
+        """Find the Claude window (again, if it was closed or restarted) and hook its moves."""
         if self.owner is None or not u.IsWindow(self.owner):
-            self.owner = find_claude()
+            for h in self.hooks:
+                u.UnhookWinEvent(h)
+            self.hooks = []
+            self.owner, self.owner_pid = find_claude()
             if self.owner:
                 # Owned by Claude: stays just above it, hides when it's minimised.
                 u.SetWindowLongPtrW(self.hwnd, -8, self.owner)
-                dpi = u.GetDpiForWindow(self.owner) or 96
-                self.root.tk.call('tk', 'scaling', dpi / 72)
-        if not self.owner or u.IsIconic(self.owner):
-            self.root.withdraw()
+                self.root.tk.call('tk', 'scaling', (u.GetDpiForWindow(self.owner) or 96) / 72)
+                for lo, hi in ((EVENT_LOCATIONCHANGE, EVENT_LOCATIONCHANGE), (EVENT_MINIMIZESTART, EVENT_MINIMIZEEND)):
+                    self.hooks.append(u.SetWinEventHook(lo, hi, None, self.on_event, self.owner_pid, 0, 0))
+                self.last_rect = None
+        self.place()   # safety net in case an event was missed
+        self.root.after(1000 if self.owner else 2000, self.watch)
+
+    def place(self):
+        """Snap to the left edge of the Claude window (only ever moves this panel)."""
+        if not self.owner or u.IsIconic(self.owner) or not u.IsWindowVisible(self.owner):
+            if not self.hidden:
+                self.root.withdraw(); self.hidden = True
             self.last_rect = None
-        else:
-            r = w.RECT()
-            # The visible edge (DWMWA_EXTENDED_FRAME_BOUNDS = 9), not GetWindowRect, which
-            # includes Windows' invisible resize border and leaves a gap.
-            if ctypes.windll.dwmapi.DwmGetWindowAttribute(self.owner, 9, ctypes.byref(r), ctypes.sizeof(r)) != 0:
-                u.GetWindowRect(self.owner, ctypes.byref(r))
-            rect = (r.left, r.top, r.right, r.bottom)
-            if rect != self.last_rect:
-                self.last_rect = rect
-                dpi = u.GetDpiForWindow(self.owner) or 96
-                width = int(WIDTH * dpi / 96)
-                self.root.deiconify()
-                # SWP_NOACTIVATE (0x10) | SWP_NOZORDER (0x4): never steals focus
-                # +1: cover Claude's own 1px left border line so the two read as one window.
-                u.SetWindowPos(self.hwnd, 0, r.left - width, r.top, width + 1, r.bottom - r.top, 0x14)
-        self.root.after(250, self.follow)
+            return
+        r = w.RECT()
+        # The visible edge (DWMWA_EXTENDED_FRAME_BOUNDS = 9), not GetWindowRect, which
+        # includes Windows' invisible resize border and leaves a gap.
+        if dwm.DwmGetWindowAttribute(self.owner, 9, ctypes.byref(r), ctypes.sizeof(r)) != 0:
+            u.GetWindowRect(self.owner, ctypes.byref(r))
+        rect = (r.left, r.top, r.right, r.bottom)
+        if rect == self.last_rect and not self.hidden:
+            return
+        self.last_rect = rect
+        if self.hidden:
+            self.root.deiconify(); self.hidden = False
+        width = int(WIDTH * (u.GetDpiForWindow(self.owner) or 96) / 96)
+        # +1 covers Claude's own 1px border so the two read as one window.
+        # SWP_NOACTIVATE | SWP_NOZORDER: never steals focus or changes stacking.
+        u.SetWindowPos(self.hwnd, 0, r.left - width, r.top, width + 1, r.bottom - r.top, 0x14)
 
 
 if __name__ == '__main__':
