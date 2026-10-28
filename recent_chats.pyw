@@ -173,7 +173,9 @@ class Chats:
         for _, e in seen.values():
             if e:
                 st = status(e, now)
-                if st == 'running' and self.asking(e[7]):
+                # An open question waits as long as you leave it, and the app stops counting the
+                # chat as working meanwhile, so check every chat (cached: re-read only on change).
+                if st != 'input' and self.asking(e[7]):
                     st = 'input'
                 chats.append((e[0], e[1], e[2], self.groups.get(e[1], ''), st))
         chats.sort(reverse=True)
