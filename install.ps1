@@ -42,7 +42,13 @@ New-Item -ItemType Directory -Force -Path $Dir | Out-Null
 Invoke-WebRequest -Uri $Url -OutFile $App -UseBasicParsing
 Write-Host "[ok] Installed to $App"
 
-# 4. Start with Windows.
+# 4. Hook that tells the panel when a chat shows a permission prompt (the yellow dot).
+#    Adds one entry to ~/.claude/settings.json and keeps everything else in it.
+& $python $App --install-hook | Out-Null
+if ($LASTEXITCODE -eq 0) { Write-Host '[ok] Permission-prompt hook added to ~/.claude/settings.json' }
+else { Write-Host '[!] Could not add the permission-prompt hook; the panel works without it' -ForegroundColor Yellow }
+
+# 5. Start with Windows.
 $s = (New-Object -ComObject WScript.Shell).CreateShortcut($Lnk)
 $s.TargetPath = $pythonw
 $s.Arguments = "`"$App`""
@@ -51,7 +57,7 @@ $s.Description = 'Claude Recent Chats panel'
 $s.Save()
 Write-Host '[ok] Starts with Windows'
 
-# 5. Start it now.
+# 6. Start it now.
 Start-Process -FilePath $pythonw -ArgumentList "`"$App`"" -WorkingDirectory $Dir
 Start-Sleep -Seconds 2
 $running = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | Where-Object { $_.CommandLine -like '*recent_chats.pyw*' }

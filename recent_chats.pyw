@@ -17,6 +17,11 @@ SHOW = 40             # how many chats to list (pinned chats come on top of thes
 APPDATA = os.environ['APPDATA']
 # Width, condensed view and pins, saved as you change them.
 SETTINGS = os.path.join(os.environ.get('LOCALAPPDATA', APPDATA), 'ClaudeRecentChats', 'settings.json')
+# Permission prompts live only in the app's memory. Claude Code's Notification hook runs
+# `recent_chats.pyw --hook` when one has been open a few seconds; it leaves a marker here.
+PROMPTS = os.path.join(os.path.dirname(SETTINGS), 'prompts')
+PROMPT_TYPES = ('permission_prompt', 'elicitation_dialog')
+CLAUDE_SETTINGS = os.path.join(os.path.expanduser('~'), '.claude', 'settings.json')
 SESSIONS = os.path.join(APPDATA, 'Claude', 'claude-code-sessions')
 CONFIG = os.path.join(APPDATA, 'Claude', 'claude_desktop_config.json')
 APP_CONFIG = os.path.join(APPDATA, 'Claude', 'config.json')   # names the signed-in account
@@ -115,8 +120,11 @@ class Chats:
         self.account = None
         self.transcripts = {}         # CLI session id -> (path, (mtime_ns, size), asking)
 
-    def asking(self, cli_id):
-        """True while a running chat shows you a question or plan prompt (read from its transcript)."""
+    def asking(self, cli_id, marker_ns=None):
+        """True while a chat shows you a question, plan or permission prompt.
+
+        Questions and plans are read from the end of its transcript. A permission prompt left a
+        marker (see run_hook); it counts until the transcript moves on (you answered)."""
         if not cli_id:
             return False
         path, stamp, result = self.transcripts.get(cli_id) or (None, None, False)
@@ -132,6 +140,13 @@ class Chats:
         if new != stamp:
             result = _asking(path, st.st_size)
             self.transcripts[cli_id] = (path, new, result)
+        if marker_ns is not None:
+            if marker_ns >= new[0]:
+                return True
+            try:
+                os.remove(os.path.join(PROMPTS, cli_id + '.json'))   # answered: tidy up
+            except OSError:
+                pass
         return result
 
     def load(self):
@@ -169,13 +184,19 @@ class Chats:
                         seen[e.path] = old if old and old[0] == stamp else (stamp, _parse(e.path))
         self.files = seen
         now = time.time() * 1000
+        markers = {}
+        try:
+            with os.scandir(PROMPTS) as it:
+                markers = {e.name[:-5]: e.stat().st_mtime_ns for e in it if e.name.endswith('.json')}
+        except OSError:
+            pass
         chats = []
         for _, e in seen.values():
             if e:
                 st = status(e, now)
                 # An open question waits as long as you leave it, and the app stops counting the
                 # chat as working meanwhile, so check every chat (cached: re-read only on change).
-                if st != 'input' and self.asking(e[7]):
+                if st != 'input' and self.asking(e[7], markers.get(e[7])):
                     st = 'input'
                 chats.append((e[0], e[1], e[2], self.groups.get(e[1], ''), st))
         chats.sort(reverse=True)
@@ -287,6 +308,49 @@ def save_settings(s):
         os.replace(SETTINGS + '.tmp', SETTINGS)
     except OSError:
         pass
+
+
+def run_hook():
+    """Run by Claude Code's Notification hook: note that a chat is showing a permission prompt."""
+    try:
+        data = json.loads(sys.stdin.read() or '{}')
+        sid = str(data.get('session_id') or '')
+        if data.get('notification_type') in PROMPT_TYPES and sid and all(c.isalnum() or c == '-' for c in sid):
+            os.makedirs(PROMPTS, exist_ok=True)
+            with open(os.path.join(PROMPTS, sid + '.json'), 'w', encoding='utf-8') as f:
+                json.dump({'type': data['notification_type'], 'at': time.time()}, f)
+    except Exception:
+        pass   # never get in Claude's way
+
+
+def set_hook(on):
+    """Add (on=True) or remove the Notification hook in ~/.claude/settings.json, keeping the rest."""
+    try:
+        with open(CLAUDE_SETTINGS, encoding='utf-8') as f:
+            cfg = json.load(f)
+        with open(CLAUDE_SETTINGS + '.recent-chats-backup', 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, indent=2)
+    except FileNotFoundError:
+        cfg = {}
+    hooks = cfg.setdefault('hooks', {})
+    ours = lambda g: any('recent_chats.pyw' in str(h.get('command', '')) for h in g.get('hooks', []))
+    groups = [g for g in hooks.get('Notification', []) if not ours(g)]
+    if on:
+        pyw = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+        exe = pyw if os.path.exists(pyw) else sys.executable
+        cmd = '"%s" "%s" --hook' % (exe.replace('\\', '/'), os.path.abspath(__file__).replace('\\', '/'))
+        groups.append({'matcher': '|'.join(PROMPT_TYPES), 'hooks': [{'type': 'command', 'command': cmd, 'timeout': 10}]})
+    if groups:
+        hooks['Notification'] = groups
+    else:
+        hooks.pop('Notification', None)
+    if not hooks:
+        cfg.pop('hooks')
+    os.makedirs(os.path.dirname(CLAUDE_SETTINGS), exist_ok=True)
+    with open(CLAUDE_SETTINGS + '.tmp', 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, indent=2)
+    os.replace(CLAUDE_SETTINGS + '.tmp', CLAUDE_SETTINGS)
+    print('hook added' if on else 'hook removed')
 
 
 def ago(ms):
@@ -600,4 +664,9 @@ class Panel:
 
 
 if __name__ == '__main__':
-    Panel().root.mainloop()
+    if '--hook' in sys.argv:
+        run_hook()
+    elif '--install-hook' in sys.argv or '--remove-hook' in sys.argv:
+        set_hook('--install-hook' in sys.argv)
+    else:
+        Panel().root.mainloop()

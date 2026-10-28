@@ -48,7 +48,7 @@ Follow the "Instructions for Claude" section in its README.
 irm https://raw.githubusercontent.com/mastachef/claude-recent-chats/main/install.ps1 | iex
 ```
 
-The installer checks for Python, downloads the panel from the [latest release](https://github.com/mastachef/claude-recent-chats/releases/latest) into `%LOCALAPPDATA%\ClaudeRecentChats`, adds it to Windows startup and starts it. Run it again any time to update.
+The installer checks for Python, downloads the panel from the [latest release](https://github.com/mastachef/claude-recent-chats/releases/latest) into `%LOCALAPPDATA%\ClaudeRecentChats`, adds the permission-prompt hook to `~\.claude\settings.json` (a backup is saved next to it), adds the panel to Windows startup and starts it. Run it again any time to update.
 
 You need [Python 3.9+](https://www.python.org/downloads/) (the python.org installer includes tkinter). If it's missing, the installer tells you how to get it.
 
@@ -65,7 +65,7 @@ This stops the panel, removes it from startup and deletes its folder. Your chats
 If a user asks you to install this, follow these steps in order. Everything runs in PowerShell on the user's own Windows PC.
 
 1. **Check Python.** Run `py -3 -c "import sys, tkinter; print(sys.version)"`. If that fails, try `python` instead of `py -3`. If neither works or the version is below 3.9, ask the user before installing Python, then run `winget install -e --id Python.Python.3.12` and open a new shell.
-2. **Install.** Run `irm https://raw.githubusercontent.com/mastachef/claude-recent-chats/main/install.ps1 | iex`. It prints `[ok]` lines and ends with `Running.`
+2. **Install.** Run `irm https://raw.githubusercontent.com/mastachef/claude-recent-chats/main/install.ps1 | iex`. It prints `[ok]` lines and ends with `Running.` It adds a hook to `~\.claude\settings.json`, so Claude Code's auto mode may refuse to run it for you. If so, give the user the command to run in their own PowerShell window.
 3. **Verify.** Run `Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | Where-Object { $_.CommandLine -like '*recent_chats.pyw*' }`. One process should be listed. Then confirm the shortcut `Claude Recent Chats.lnk` exists in `[Environment]::GetFolderPath('Startup')`.
 4. **Tell the user** that the panel is on the left edge of their Claude window, that clicking a chat opens it, and that the ✕ closes it until the next sign-in. Don't take screenshots of their screen to check: it shows their private chat titles.
 
@@ -105,7 +105,8 @@ BG, ROW_HOVER, TEXT, DIM, ACCENT = '#1f1f1e', '#2c2c2a', '#e8e6e1', '#8f8d88', '
 | Chat titles and last-used times | `%APPDATA%\Claude\claude-code-sessions\<account>\…\local_*.json`, for the signed-in account only (named in `%APPDATA%\Claude\config.json`). After an account switch the old folder keeps stale copies the app no longer shows |
 | Sidebar groups | `%APPDATA%\Claude\claude_desktop_config.json` |
 | In progress (orange dot) | a turn has started but not ended: the chat's last turn edge is the start of your latest message. Matches the app's own running flag |
-| Waiting on you (yellow dot) | Claude is showing you a question or plan to approve (read from the end of the chat's transcript in `~\.claude\projects`), or the last turn ended blocked on you or failed and you haven't replied since. Same rules as the app, except permission prompts, which the app keeps only in memory |
+| Waiting on you (yellow dot) | Claude is showing you a question or plan to approve (read from the end of the chat's transcript in `~\.claude\projects`), or a permission prompt (see below), or the last turn ended blocked on you or failed and you haven't replied since |
+| Permission prompts | the app keeps these only in memory, so the installer adds a Claude Code `Notification` hook to `~\.claude\settings.json`. When a prompt has been open about 6 seconds, Claude Code runs `recent_chats.pyw --hook`, which leaves a small marker file. The dot stays yellow until the chat's transcript moves on (you answered). The hook only writes that file; uninstalling removes it |
 | Unread (blue dot) | the chat had activity after you last focused it (older chats with no focus time count as read) |
 | Opening a chat | the `claude://claude.ai/epitaxy/<session id>` link, which Windows hands to the Claude app |
 | Docking | the panel keeps itself directly above the Claude window and hides when Claude is minimised. It snaps to Claude's visible edge and covers its 1-pixel border, so the two read as one window. It is deliberately not an "owned" window: owning a window from another program ties the two programs' input together and made dragging Claude laggy |
