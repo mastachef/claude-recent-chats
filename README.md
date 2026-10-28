@@ -22,6 +22,9 @@ This panel adds one, without changing anything in the app:
 - **Status dots**: a pulsing orange dot while Claude is working in a chat, a yellow dot when it has stopped and is waiting on you, a blue dot when there's something new you haven't looked at
 - **Its group and how long ago you used it** under each title (`Website · 2m`)
 - **Click to open** that chat in Claude
+- **Pin chats to the top**: hover a chat and click the pin on its right (click again to unpin)
+- **Condensed view**: the arrows button next to ✕ switches to one-line rows
+- **Adjustable width**: drag the panel's left edge
 - **Snaps to Claude's left edge** with no gap: it moves and resizes with the window and hides when Claude is minimised
 - **Read-only and offline**: it only reads Claude's files on your own computer, and sends nothing anywhere
 - **One file, no dependencies**: just Python's standard library
@@ -84,11 +87,13 @@ This shows made-up chats instead of yours, like the screenshot above. It's handy
 
 ## Settings
 
-Change these at the top of `recent_chats.pyw`:
+Pins, the condensed view and the width are saved as you change them, in `%LOCALAPPDATA%\ClaudeRecentChats\settings.json`. Updating keeps them; uninstalling deletes them.
+
+For the rest, change these at the top of `recent_chats.pyw`:
 
 ```python
-WIDTH = 270    # panel width at 100% display scaling
-SHOW = 40      # how many chats to list
+WIDTH = 270    # starting panel width at 100% display scaling
+SHOW = 40      # how many chats to list (pinned chats come on top of these)
 
 BG, ROW_HOVER, TEXT, DIM, ACCENT = '#1f1f1e', '#2c2c2a', '#e8e6e1', '#8f8d88', '#d97757'
 ```

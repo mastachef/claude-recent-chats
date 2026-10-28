@@ -11,9 +11,12 @@ import ctypes, ctypes.wintypes as w, glob, json, math, os, sys, threading, time
 import tkinter as tk
 import tkinter.font as tkfont
 
-WIDTH = 270           # panel width at 100% display scaling
-SHOW = 40             # how many chats to list
+WIDTH = 270           # starting panel width at 100% display scaling (drag the left edge to change)
+MIN_W, MAX_W = 180, 600
+SHOW = 40             # how many chats to list (pinned chats come on top of these)
 APPDATA = os.environ['APPDATA']
+# Width, condensed view and pins, saved as you change them.
+SETTINGS = os.path.join(os.environ.get('LOCALAPPDATA', APPDATA), 'ClaudeRecentChats', 'settings.json')
 SESSIONS = os.path.join(APPDATA, 'Claude', 'claude-code-sessions')
 CONFIG = os.path.join(APPDATA, 'Claude', 'claude_desktop_config.json')
 APP_CONFIG = os.path.join(APPDATA, 'Claude', 'config.json')   # names the signed-in account
@@ -23,6 +26,9 @@ BG, ROW_HOVER, TEXT, DIM, ACCENT = '#1f1f1e', '#2c2c2a', '#e8e6e1', '#8f8d88', '
 UNREAD = '#5ea0ff'    # dot: something new you haven't looked at (in progress = pulsing ACCENT)
 INPUT = '#f0c043'     # dot: Claude stopped and is waiting on you
 STALE_MS = 15 * 60000 # a 'running' chat with no activity this long is treated as stopped
+PIN_HOVER = '#5c5a57' # the faint pin shown on the row under the mouse
+ICONS = 'Segoe MDL2 Assets'                          # Windows' built-in icon font
+PIN, CONDENSE, EXPAND = '', '', ''
 
 u = ctypes.windll.user32
 k = ctypes.windll.kernel32
@@ -171,7 +177,7 @@ class Chats:
                     st = 'input'
                 chats.append((e[0], e[1], e[2], self.groups.get(e[1], ''), st))
         chats.sort(reverse=True)
-        return chats[:SHOW]
+        return chats
 
 
 def _dirs(path):
@@ -260,6 +266,27 @@ def fit(font, text, room):
     return text.rstrip() + '…'
 
 
+def load_settings():
+    try:
+        with open(SETTINGS, encoding='utf-8') as f:
+            s = json.load(f)
+        return s if isinstance(s, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_settings(s):
+    if '--demo' in sys.argv:          # sample data: don't touch your real settings
+        return
+    try:
+        os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
+        with open(SETTINGS + '.tmp', 'w', encoding='utf-8') as f:
+            json.dump(s, f, indent=1)
+        os.replace(SETTINGS + '.tmp', SETTINGS)
+    except OSError:
+        pass
+
+
 def ago(ms):
     m = max(0, int((time.time() * 1000 - ms) / 60000))
     if m < 1: return 'now'
@@ -281,13 +308,28 @@ class Panel:
         self.last_rect = None
         self.hidden = False
         self.chats = Chats()
+        self.settings = load_settings()
+        try:
+            self.width = min(MAX_W, max(MIN_W, int(self.settings.get('width', WIDTH))))
+        except (TypeError, ValueError):
+            self.width = WIDTH
+        self.compact = self.settings.get('compact') is True
+        pins = self.settings.get('pins')
+        self.pins = [p for p in pins if isinstance(p, str)] if isinstance(pins, list) else []
 
         head = tk.Frame(self.root, bg=BG)
         head.pack(fill='x', padx=12, pady=(10, 4))
         tk.Label(head, text='Recent', bg=BG, fg=TEXT, font=('Segoe UI Semibold', 11)).pack(side='left')
+        self.icon_font = tkfont.Font(family=ICONS, size=9)
         close = tk.Label(head, text='✕', bg=BG, fg=DIM, font=('Segoe UI', 10), cursor='hand2')
         close.pack(side='right')
         close.bind('<Button-1>', lambda e: self.root.destroy())
+        self.view_btn = tk.Label(head, bg=BG, fg=DIM, font=self.icon_font, cursor='hand2')
+        self.view_btn.pack(side='right', padx=(0, 12))
+        self.view_btn.bind('<Button-1>', lambda e: self.toggle_view())
+        for b in (close, self.view_btn):
+            b.bind('<Enter>', lambda e: e.widget.configure(fg=TEXT))
+            b.bind('<Leave>', lambda e: e.widget.configure(fg=DIM))
 
         # Rows are drawn straight onto one canvas (no widget per row), so fast scrolling stays smooth.
         self.canvas = tk.Canvas(self.root, bg=BG, highlightthickness=0, bd=0, yscrollincrement=8)
@@ -296,25 +338,64 @@ class Panel:
         self.sub_font = tkfont.Font(family='Segoe UI', size=8)
         # One highlight rectangle that moves to the hovered row (40 row backgrounds doubled redraw time).
         self.highlight = self.canvas.create_rectangle(0, 0, 0, 0, fill=ROW_HOVER, width=0, state='hidden')
-        self.items = [(self.canvas.create_text(0, 0, anchor='nw', fill=TEXT, font=self.title_font),
-                       self.canvas.create_text(0, 0, anchor='nw', fill=DIM, font=self.sub_font),
-                       self.canvas.create_oval(0, 0, 0, 0, width=0, state='hidden'))
-                      for _ in range(SHOW)]
-        self.data = []          # (sid, title, sub, status) per drawn row
+        self.hover_pin = self.canvas.create_text(0, 0, anchor='e', text=PIN, fill=PIN_HOVER,
+                                                 font=self.icon_font, state='hidden')
+        self.divider = self.canvas.create_line(0, 0, 0, 0, fill=ROW_HOVER, state='hidden')
+        self.items = []         # (title, sub, dot, pin) canvas items per row, made as needed
+        self.data = []          # (sid, title, sub, status, pinned) per drawn row
+        self.n_pinned = 0
         self.running_dots = []
         self.hover = -1
         self.wheel_pending, self.wheel_job = 0.0, None
-        self.row_h = 1
+        self.row_h, self.pad, self.t_h, self.r = 1, 0, 0, 0
         self.canvas.bind('<Configure>', lambda e: self.layout())
         self.canvas.bind('<Motion>', self._motion)
         self.canvas.bind('<Leave>', lambda e: self._set_hover(-1))
         self.canvas.bind('<Button-1>', lambda e: self._click(e))
         self.root.bind_all('<MouseWheel>', self._wheel)
 
+        # Drag the left edge to change the width (the right edge stays stuck to Claude).
+        grip = tk.Frame(self.root, bg=BG, cursor='sb_h_double_arrow')
+        grip.place(x=0, y=0, relheight=1, width=5)
+        grip.bind('<B1-Motion>', self._resize)
+        grip.bind('<ButtonRelease-1>', lambda e: self.save())
+
         self.on_event = WinEventProc(self._event)   # kept on self so it isn't garbage-collected
+        self.update_view_button()
         self.refresh()
         self.watch()
         self.pulse()
+
+    def save(self):
+        self.settings.update(width=self.width, compact=self.compact, pins=self.pins)
+        save_settings(self.settings)
+
+    def toggle_view(self):
+        self.compact = not self.compact
+        self.update_view_button()
+        self.save()
+        self.layout()
+
+    def update_view_button(self):
+        self.view_btn.configure(text=EXPAND if self.compact else CONDENSE)
+
+    def toggle_pin(self, sid):
+        if sid in self.pins:
+            self.pins.remove(sid)
+        else:
+            self.pins.append(sid)      # newest pin goes to the bottom of the pinned group
+        self.save()
+        self.update_list()
+
+    def _resize(self, event):
+        if not self.last_rect:
+            return
+        scale = (u.GetDpiForWindow(self.owner) or 96) / 96
+        width = min(MAX_W, max(MIN_W, round((self.last_rect[0] - event.x_root) / scale)))
+        if width != self.width:
+            self.width = width
+            self.last_rect = None      # make place() apply the new width
+            self.place()
 
     def open_chat(self, sid):
         if not sid or sid.startswith('demo-'):
@@ -323,46 +404,76 @@ class Panel:
         threading.Thread(target=os.startfile, args=(f'claude://claude.ai/epitaxy/{sid}',), daemon=True).start()
 
     def refresh(self):
-        chats = self.chats.load()
-        data = [(sid, title, f'{group or "Ungrouped"} · {ago(t)}', st) for t, sid, title, group, st in chats]
-        if data != self.data:
-            self.data = data
-            self.draw_text()
+        self.update_list()
         self.root.after(2000, self.refresh)
 
+    def update_list(self):
+        chats = self.chats.load()
+        by_id = {c[1]: c for c in chats}
+        pinned = [by_id[p] for p in self.pins if p in by_id]
+        rest = [c for c in chats if c[1] not in self.pins][:SHOW]
+        data = [(sid, title, f'{group or "Ungrouped"} · {ago(t)}', st, i < len(pinned))
+                for i, (t, sid, title, group, st) in enumerate(pinned + rest)]
+        if data != self.data:
+            self.data, self.n_pinned = data, len(pinned)
+            self.draw_text()
+
     def layout(self):
-        """Position every row for the current width and font size (on resize or DPI change)."""
-        w_ = self.canvas.winfo_width()
-        t_h, s_h = self.title_font.metrics('linespace'), self.sub_font.metrics('linespace')
-        pad = max(4, t_h // 3)
-        self.row_h = pad + t_h + s_h + pad
-        r = max(4, t_h // 5)
-        for i, (title, sub, dot) in enumerate(self.items):
-            y = i * self.row_h
-            self.canvas.coords(title, 24, y + pad)
-            self.canvas.coords(sub, 24, y + pad + t_h)
-            cy = y + pad + t_h // 2
-            self.canvas.coords(dot, 12 - r, cy - r, 12 + r, cy + r)
+        """Position every row for the current width, font size and view (when any of them change)."""
+        self.t_h = self.title_font.metrics('linespace')
+        s_h = self.sub_font.metrics('linespace')
+        self.pad = max(3, self.t_h // 5) if self.compact else max(4, self.t_h // 3)
+        self.row_h = self.pad + self.t_h + (0 if self.compact else s_h) + self.pad
+        self.r = max(4, self.t_h // 5)
+        for i in range(len(self.items)):
+            self._place_row(i)
         self.hover = -2
         self._set_hover(-1)
         self.draw_text()
 
+    def _place_row(self, i):
+        title, sub, dot, pin = self.items[i]
+        y = i * self.row_h
+        cy = y + self.pad + self.t_h // 2
+        self.canvas.coords(title, 24, y + self.pad)
+        self.canvas.coords(sub, 24, y + self.pad + self.t_h)
+        self.canvas.coords(dot, 12 - self.r, cy - self.r, 12 + self.r, cy + self.r)
+        self.canvas.coords(pin, self.canvas.winfo_width() - 10, cy)
+
     def draw_text(self):
-        room = max(20, self.canvas.winfo_width() - 38)
+        while len(self.items) < len(self.data):
+            self.items.append((self.canvas.create_text(0, 0, anchor='nw', fill=TEXT, font=self.title_font),
+                               self.canvas.create_text(0, 0, anchor='nw', fill=DIM, font=self.sub_font),
+                               self.canvas.create_oval(0, 0, 0, 0, width=0, state='hidden'),
+                               self.canvas.create_text(0, 0, anchor='e', text=PIN, fill=DIM,
+                                                       font=self.icon_font, state='hidden')))
+            self._place_row(len(self.items) - 1)
+        width = self.canvas.winfo_width()
+        room = max(20, width - 24 - 28)     # leave the right edge for the pin
         self.running_dots = []
-        for i, (title, sub, dot) in enumerate(self.items):
+        for i, (title, sub, dot, pin) in enumerate(self.items):
             if i < len(self.data):
-                _, t, s, st = self.data[i]
+                _, t, s, st, pinned = self.data[i]
                 self.canvas.itemconfigure(title, text=fit(self.title_font, t, room), state='normal')
-                self.canvas.itemconfigure(sub, text=fit(self.sub_font, s, room), state='normal')
+                self.canvas.itemconfigure(sub, text=fit(self.sub_font, s, room),
+                                          state='hidden' if self.compact else 'normal')
                 if st == 'running':
                     self.running_dots.append(dot)
                 self.canvas.itemconfigure(dot, state='normal' if st else 'hidden',
                                           fill={'running': ACCENT, 'input': INPUT}.get(st, UNREAD))
+                self.canvas.itemconfigure(pin, state='normal' if pinned else 'hidden')
             else:
-                for item in (title, sub, dot):
+                for item in (title, sub, dot, pin):
                     self.canvas.itemconfigure(item, state='hidden')
-        self.canvas.configure(scrollregion=(0, 0, self.canvas.winfo_width(), len(self.data) * self.row_h))
+        if 0 < self.n_pinned < len(self.data):     # a thin line under the pinned chats
+            y = self.n_pinned * self.row_h
+            self.canvas.coords(self.divider, 12, y, width - 12, y)
+            self.canvas.itemconfigure(self.divider, state='normal')
+        else:
+            self.canvas.itemconfigure(self.divider, state='hidden')
+        self.canvas.configure(scrollregion=(0, 0, width, len(self.data) * self.row_h))
+        self.hover, i = -2, self.hover
+        self._set_hover(i if i < len(self.data) else -1)
 
     def pulse(self):
         """Gently pulse the in-progress dots (only those few items are touched)."""
@@ -384,8 +495,13 @@ class Panel:
             y = i * self.row_h
             self.canvas.coords(self.highlight, 6, y, self.canvas.winfo_width() - 6, y + self.row_h)
             self.canvas.itemconfigure(self.highlight, state='normal')
+            # A faint pin on the hovered row: click it to pin the chat to the top.
+            self.canvas.coords(self.hover_pin, self.canvas.winfo_width() - 10, y + self.pad + self.t_h // 2)
+            self.canvas.itemconfigure(self.hover_pin, state='hidden' if self.data[i][4] else 'normal')
+            self.canvas.tag_raise(self.hover_pin)
         else:
             self.canvas.itemconfigure(self.highlight, state='hidden')
+            self.canvas.itemconfigure(self.hover_pin, state='hidden')
         self.hover = i
         self.canvas.configure(cursor='hand2' if i >= 0 else '')
 
@@ -394,7 +510,11 @@ class Panel:
 
     def _click(self, event):
         i = self._row_at(event)
-        if i >= 0:
+        if i < 0:
+            return
+        if event.x >= self.canvas.winfo_width() - 28:   # the pin area at the right edge
+            self.toggle_pin(self.data[i][0])
+        else:
             self.open_chat(self.data[i][0])
 
     def _wheel(self, event):
@@ -471,7 +591,7 @@ class Panel:
         if self.hidden:
             self.root.deiconify(); self.hidden = False
             self.stack()
-        width = int(WIDTH * (u.GetDpiForWindow(self.owner) or 96) / 96)
+        width = int(self.width * (u.GetDpiForWindow(self.owner) or 96) / 96)
         # +1 covers Claude's own 1px border so the two read as one window.
         # SWP_NOACTIVATE | SWP_NOZORDER: never steals focus or changes stacking.
         u.SetWindowPos(self.hwnd, 0, r.left - width, r.top, width + 1, r.bottom - r.top, 0x14)
