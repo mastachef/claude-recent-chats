@@ -7,7 +7,7 @@ changes chats, groups or the Claude window.
 Run:  pythonw recent_chats.pyw          (pythonw = no console window)
       pythonw recent_chats.pyw --demo   (sample chats, for screenshots)
 """
-import ctypes, ctypes.wintypes as w, json, math, os, sys, threading, time
+import ctypes, ctypes.wintypes as w, glob, json, math, os, sys, threading, time
 import tkinter as tk
 import tkinter.font as tkfont
 
@@ -17,6 +17,7 @@ APPDATA = os.environ['APPDATA']
 SESSIONS = os.path.join(APPDATA, 'Claude', 'claude-code-sessions')
 CONFIG = os.path.join(APPDATA, 'Claude', 'claude_desktop_config.json')
 APP_CONFIG = os.path.join(APPDATA, 'Claude', 'config.json')   # names the signed-in account
+TRANSCRIPTS = os.path.join(os.path.expanduser('~'), '.claude', 'projects')
 
 BG, ROW_HOVER, TEXT, DIM, ACCENT = '#1f1f1e', '#2c2c2a', '#e8e6e1', '#8f8d88', '#d97757'
 UNREAD = '#5ea0ff'    # dot: something new you haven't looked at (in progress = pulsing ACCENT)
@@ -106,6 +107,26 @@ class Chats:
         self.groups = {}
         self.acct_stamp = None
         self.account = None
+        self.transcripts = {}         # CLI session id -> (path, (mtime_ns, size), asking)
+
+    def asking(self, cli_id):
+        """True while a running chat shows you a question or plan prompt (read from its transcript)."""
+        if not cli_id:
+            return False
+        path, stamp, result = self.transcripts.get(cli_id) or (None, None, False)
+        try:
+            if not path:
+                path = next(iter(glob.glob(os.path.join(TRANSCRIPTS, '*', glob.escape(cli_id) + '.jsonl'))), None)
+                if not path:
+                    return False
+            st = os.stat(path); new = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            self.transcripts.pop(cli_id, None)
+            return False
+        if new != stamp:
+            result = _asking(path, st.st_size)
+            self.transcripts[cli_id] = (path, new, result)
+        return result
 
     def load(self):
         if '--demo' in sys.argv:
@@ -142,7 +163,13 @@ class Chats:
                         seen[e.path] = old if old and old[0] == stamp else (stamp, _parse(e.path))
         self.files = seen
         now = time.time() * 1000
-        chats = [(e[0], e[1], e[2], self.groups.get(e[1], ''), status(e, now)) for _, e in seen.values() if e]
+        chats = []
+        for _, e in seen.values():
+            if e:
+                st = status(e, now)
+                if st == 'running' and self.asking(e[7]):
+                    st = 'input'
+                chats.append((e[0], e[1], e[2], self.groups.get(e[1], ''), st))
         chats.sort(reverse=True)
         return chats[:SHOW]
 
@@ -168,11 +195,44 @@ def _parse(path):
     focused = d.get('lastFocusedAt') or activity
     # Waiting on you: the last turn's summary says it needs you (same rule as the app's sidebar).
     summary, wrap = d.get('postTurnSummary') or {}, d.get('turnWrapUp')
-    needs = bool(wrap.get('needsUser')) if isinstance(wrap, dict) else \
-        summary.get('status_category') in ('blocked', 'need_input')
+    category = summary.get('status_category')
+    needs = category == 'failed' or bool(wrap.get('needsUser')) if isinstance(wrap, dict) else \
+        category in ('blocked', 'need_input', 'failed')
     needs = needs and summary.get('summarizes_uuid', d.get('lastAssistantUuid')) == d.get('lastAssistantUuid')
     return (activity, d['sessionId'], d['title'],
-            d.get('lastTurnEdgeAt') or 0, d.get('latestUserFrameAt') or 0, focused, needs)
+            d.get('lastTurnEdgeAt') or 0, d.get('latestUserFrameAt') or 0, focused, needs, d.get('cliSessionId'))
+
+
+ASK_TOOLS = ('AskUserQuestion', 'ExitPlanMode')   # tools that always wait for your answer
+
+
+def _asking(path, size):
+    """True if the transcript's last message is an unanswered question or plan prompt."""
+    try:
+        with open(path, 'rb') as f:
+            for chunk in (1 << 18, 1 << 21, 1 << 23):    # the last message is usually near the end
+                f.seek(max(0, size - chunk))
+                lines = f.read().splitlines()
+                if size > chunk:
+                    lines = lines[1:]                     # first line may be cut
+                for line in reversed(lines):
+                    if b'"type":"assistant"' not in line and b'"type":"user"' not in line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    if r.get('type') not in ('assistant', 'user') or r.get('isSidechain'):
+                        continue
+                    content = (r.get('message') or {}).get('content')
+                    return r['type'] == 'assistant' and isinstance(content, list) and any(
+                        isinstance(x, dict) and x.get('type') == 'tool_use' and x.get('name') in ASK_TOOLS
+                        for x in content)
+                if size <= chunk:
+                    break
+    except OSError:
+        pass
+    return False
 
 
 def status(entry, now):
@@ -181,7 +241,7 @@ def status(entry, now):
 
     A turn is in progress while the last turn edge is the start of your latest message (the edge
     moves past it when the turn ends). Matches the app's own running flag."""
-    activity, _, _, edge, user_frame, focused, needs = entry
+    activity, _, _, edge, user_frame, focused, needs, _ = entry
     if user_frame and edge - user_frame < 2000 and now - activity < STALE_MS:
         return 'running'
     if needs and user_frame <= edge:

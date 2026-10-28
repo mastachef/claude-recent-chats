@@ -100,7 +100,7 @@ BG, ROW_HOVER, TEXT, DIM, ACCENT = '#1f1f1e', '#2c2c2a', '#e8e6e1', '#8f8d88', '
 | Chat titles and last-used times | `%APPDATA%\Claude\claude-code-sessions\<account>\…\local_*.json`, for the signed-in account only (named in `%APPDATA%\Claude\config.json`). After an account switch the old folder keeps stale copies the app no longer shows |
 | Sidebar groups | `%APPDATA%\Claude\claude_desktop_config.json` |
 | In progress (orange dot) | a turn has started but not ended: the chat's last turn edge is the start of your latest message. Matches the app's own running flag |
-| Waiting on you (yellow dot) | the last turn's summary says Claude needs something from you, and you haven't replied since. Same rule as the app's sidebar |
+| Waiting on you (yellow dot) | Claude is showing you a question or plan to approve (read from the end of the chat's transcript in `~\.claude\projects`), or the last turn ended blocked on you or failed and you haven't replied since. Same rules as the app, except permission prompts, which the app keeps only in memory |
 | Unread (blue dot) | the chat had activity after you last focused it (older chats with no focus time count as read) |
 | Opening a chat | the `claude://claude.ai/epitaxy/<session id>` link, which Windows hands to the Claude app |
 | Docking | the panel keeps itself directly above the Claude window and hides when Claude is minimised. It snaps to Claude's visible edge and covers its 1-pixel border, so the two read as one window. It is deliberately not an "owned" window: owning a window from another program ties the two programs' input together and made dragging Claude laggy |
