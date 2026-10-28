@@ -67,7 +67,7 @@ If a user asks you to install this, follow these steps in order. Everything runs
 1. **Check Python.** Run `py -3 -c "import sys, tkinter; print(sys.version)"`. If that fails, try `python` instead of `py -3`. If neither works or the version is below 3.9, ask the user before installing Python, then run `winget install -e --id Python.Python.3.12` and open a new shell.
 2. **Install.** Run `irm https://raw.githubusercontent.com/mastachef/claude-recent-chats/main/install.ps1 | iex`. It prints `[ok]` lines and ends with `Running.` It adds a hook to `~\.claude\settings.json`, so Claude Code's auto mode may refuse to run it for you. If so, give the user the command to run in their own PowerShell window.
 3. **Verify.** Run `Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | Where-Object { $_.CommandLine -like '*recent_chats.pyw*' }`. One process should be listed. Then confirm the shortcut `Claude Recent Chats.lnk` exists in `[Environment]::GetFolderPath('Startup')`.
-4. **Tell the user** that the panel is on the left edge of their Claude window, that clicking a chat opens it, and that the ✕ closes it until the next sign-in. Don't take screenshots of their screen to check: it shows their private chat titles.
+4. **Tell the user** that the panel is on the left edge of their Claude window, that clicking a chat opens it, and that the ✕ hides it until Claude is next opened. Don't take screenshots of their screen to check: it shows their private chat titles.
 
 Do not move or resize the user's Claude window, and don't edit Claude's own files. The panel only reads them.
 

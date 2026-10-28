@@ -373,6 +373,7 @@ class Panel:
         self.owner, self.owner_pid, self.hooks = None, 0, []
         self.last_rect = None
         self.hidden = False
+        self.dismissed = None   # the Claude window you closed the panel on (hidden until Claude reopens)
         self.chats = Chats()
         self.settings = load_settings()
         try:
@@ -389,7 +390,7 @@ class Panel:
         self.icon_font = tkfont.Font(family=ICONS, size=9)
         close = tk.Label(head, text='✕', bg=BG, fg=DIM, font=('Segoe UI', 10), cursor='hand2')
         close.pack(side='right')
-        close.bind('<Button-1>', lambda e: self.root.destroy())
+        close.bind('<Button-1>', lambda e: self.dismiss())
         self.view_btn = tk.Label(head, bg=BG, fg=DIM, font=self.icon_font, cursor='hand2')
         self.view_btn.pack(side='right', padx=(0, 12))
         self.view_btn.bind('<Button-1>', lambda e: self.toggle_view())
@@ -431,6 +432,11 @@ class Panel:
         self.refresh()
         self.watch()
         self.pulse()
+
+    def dismiss(self):
+        """✕: hide until Claude is next opened. The panel keeps running, so it comes back by itself."""
+        self.dismissed = self.owner
+        self.place()
 
     def save(self):
         self.settings.update(width=self.width, compact=self.compact, pins=self.pins)
@@ -640,7 +646,7 @@ class Panel:
 
     def place(self):
         """Snap to the left edge of the Claude window (only ever moves this panel)."""
-        if not self.owner or u.IsIconic(self.owner) or not u.IsWindowVisible(self.owner):
+        if not self.owner or self.owner == self.dismissed or u.IsIconic(self.owner) or not u.IsWindowVisible(self.owner):
             if not self.hidden:
                 self.root.withdraw(); self.hidden = True
             self.last_rect = None
