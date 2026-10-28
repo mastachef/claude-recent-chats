@@ -16,9 +16,11 @@ SHOW = 40             # how many chats to list
 APPDATA = os.environ['APPDATA']
 SESSIONS = os.path.join(APPDATA, 'Claude', 'claude-code-sessions')
 CONFIG = os.path.join(APPDATA, 'Claude', 'claude_desktop_config.json')
+APP_CONFIG = os.path.join(APPDATA, 'Claude', 'config.json')   # names the signed-in account
 
 BG, ROW_HOVER, TEXT, DIM, ACCENT = '#1f1f1e', '#2c2c2a', '#e8e6e1', '#8f8d88', '#d97757'
 UNREAD = '#5ea0ff'    # dot: something new you haven't looked at (in progress = pulsing ACCENT)
+INPUT = '#f0c043'     # dot: Claude stopped and is waiting on you
 STALE_MS = 15 * 60000 # a 'running' chat with no activity this long is treated as stopped
 
 u = ctypes.windll.user32
@@ -84,7 +86,7 @@ def groups_from(cfg):
     return out
 
 
-DEMO_STATUS = {0: 'running', 2: 'unread', 5: 'unread'}   # row -> dot in --demo
+DEMO_STATUS = {0: 'running', 2: 'unread', 3: 'input', 5: 'unread'}   # row -> dot in --demo
 DEMO = [  # (minutes ago, title, group): shown with --demo, for screenshots
     (0, 'Landing page redesign', 'Website'), (2, 'Fix flaky checkout tests', 'Shop backend'),
     (9, 'Boss fight animations', 'Game'), (24, 'Weekly analytics report', 'Data'),
@@ -102,6 +104,8 @@ class Chats:
         self.files = {}               # path -> ((mtime_ns, size), entry or None)
         self.cfg_stamp = None
         self.groups = {}
+        self.acct_stamp = None
+        self.account = None
 
     def load(self):
         if '--demo' in sys.argv:
@@ -115,8 +119,19 @@ class Chats:
                     self.groups = groups_from(json.load(f))
         except Exception:
             pass
+        try:
+            st = os.stat(APP_CONFIG); stamp = (st.st_mtime_ns, st.st_size)
+            if stamp != self.acct_stamp:
+                self.acct_stamp = stamp
+                with open(APP_CONFIG, encoding='utf-8') as f:
+                    self.account = json.load(f).get('lastKnownAccountUuid')
+        except Exception:
+            pass
+        # Only the signed-in account's folder: after an account switch the app copies the chats
+        # over and leaves stale copies in the old folder, which it no longer shows.
+        mine = os.path.join(SESSIONS, self.account) if self.account else None
         seen = {}
-        for org in _dirs(SESSIONS):
+        for org in [mine] if mine and os.path.isdir(mine) else _dirs(SESSIONS):
             for acct in _dirs(org):
                 with os.scandir(acct) as it:
                     for e in it:
@@ -148,18 +163,29 @@ def _parse(path):
         return None
     if d.get('isArchived') or not d.get('title'):
         return None
-    return (d.get('lastActivityAt') or 0, d['sessionId'], d['title'],
-            d.get('lastTurnEdgeAt') or 0, d.get('latestUserFrameAt') or 0, d.get('lastFocusedAt') or 0)
+    activity = d.get('lastActivityAt') or 0
+    # Chats from before the app recorded focus times have none: treat them as read.
+    focused = d.get('lastFocusedAt') or activity
+    # Waiting on you: the last turn's summary says it needs you (same rule as the app's sidebar).
+    summary, wrap = d.get('postTurnSummary') or {}, d.get('turnWrapUp')
+    needs = bool(wrap.get('needsUser')) if isinstance(wrap, dict) else \
+        summary.get('status_category') in ('blocked', 'need_input')
+    needs = needs and summary.get('summarizes_uuid', d.get('lastAssistantUuid')) == d.get('lastAssistantUuid')
+    return (activity, d['sessionId'], d['title'],
+            d.get('lastTurnEdgeAt') or 0, d.get('latestUserFrameAt') or 0, focused, needs)
 
 
 def status(entry, now):
-    """'running' while Claude works in the chat, 'unread' if it did something since you last looked.
+    """'running' while Claude works in the chat, 'input' if it stopped to wait on you,
+    'unread' if it did something since you last looked.
 
     A turn is in progress while the last turn edge is the start of your latest message (the edge
     moves past it when the turn ends). Matches the app's own running flag."""
-    activity, _, _, edge, user_frame, focused = entry
+    activity, _, _, edge, user_frame, focused, needs = entry
     if user_frame and edge - user_frame < 2000 and now - activity < STALE_MS:
         return 'running'
+    if needs and user_frame <= edge:
+        return 'input'
     if activity > focused + 1000:
         return 'unread'
     return ''
@@ -272,7 +298,7 @@ class Panel:
                 if st == 'running':
                     self.running_dots.append(dot)
                 self.canvas.itemconfigure(dot, state='normal' if st else 'hidden',
-                                          fill=ACCENT if st == 'running' else UNREAD)
+                                          fill={'running': ACCENT, 'input': INPUT}.get(st, UNREAD))
             else:
                 for item in (title, sub, dot):
                     self.canvas.itemconfigure(item, state='hidden')

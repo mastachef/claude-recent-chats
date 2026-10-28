@@ -19,7 +19,7 @@ Sidebar groups are great for keeping chats organised by project. But once you ha
 This panel adds one, without changing anything in the app:
 
 - **Every chat, newest first**, whatever group it's in
-- **Status dots**: a pulsing orange dot while Claude is working in a chat, a blue dot when there's something new you haven't looked at
+- **Status dots**: a pulsing orange dot while Claude is working in a chat, a yellow dot when it has stopped and is waiting on you, a blue dot when there's something new you haven't looked at
 - **Its group and how long ago you used it** under each title (`Website · 2m`)
 - **Click to open** that chat in Claude
 - **Snaps to Claude's left edge** with no gap: it moves and resizes with the window and hides when Claude is minimised
@@ -97,10 +97,11 @@ BG, ROW_HOVER, TEXT, DIM, ACCENT = '#1f1f1e', '#2c2c2a', '#e8e6e1', '#8f8d88', '
 
 | What | Where it comes from |
 | --- | --- |
-| Chat titles and last-used times | `%APPDATA%\Claude\claude-code-sessions\…\local_*.json` |
+| Chat titles and last-used times | `%APPDATA%\Claude\claude-code-sessions\<account>\…\local_*.json`, for the signed-in account only (named in `%APPDATA%\Claude\config.json`). After an account switch the old folder keeps stale copies the app no longer shows |
 | Sidebar groups | `%APPDATA%\Claude\claude_desktop_config.json` |
 | In progress (orange dot) | a turn has started but not ended: the chat's last turn edge is the start of your latest message. Matches the app's own running flag |
-| Unread (blue dot) | the chat had activity after you last focused it |
+| Waiting on you (yellow dot) | the last turn's summary says Claude needs something from you, and you haven't replied since. Same rule as the app's sidebar |
+| Unread (blue dot) | the chat had activity after you last focused it (older chats with no focus time count as read) |
 | Opening a chat | the `claude://claude.ai/epitaxy/<session id>` link, which Windows hands to the Claude app |
 | Docking | the panel keeps itself directly above the Claude window and hides when Claude is minimised. It snaps to Claude's visible edge and covers its 1-pixel border, so the two read as one window. It is deliberately not an "owned" window: owning a window from another program ties the two programs' input together and made dragging Claude laggy |
 
