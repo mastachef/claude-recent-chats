@@ -53,6 +53,9 @@ EVENT_FOREGROUND, EVENT_MINIMIZESTART, EVENT_MINIMIZEEND, EVENT_LOCATIONCHANGE =
 WinEventProc = ctypes.WINFUNCTYPE(None, w.HANDLE, w.DWORD, w.HWND, w.LONG, w.LONG, w.DWORD, w.DWORD)
 u.SetWinEventHook.restype = w.HANDLE
 u.SetWinEventHook.argtypes = [w.DWORD, w.DWORD, w.HMODULE, WinEventProc, w.DWORD, w.DWORD, w.DWORD]
+# Hook handles are 64-bit: without this, unhooking a big one raised OverflowError, which
+# stopped watch() for good and left the panel hidden after Claude restarted.
+u.UnhookWinEvent.argtypes = [w.HANDLE]
 
 
 def find_claude():
@@ -627,7 +630,11 @@ class Panel:
 
     def watch(self):
         """Find the Claude window (again, if it was closed or restarted) and hook its moves."""
-        if self.owner is None or not u.IsWindow(self.owner):
+        # Look again when the window is gone or hidden (not minimised): Claude briefly shows a
+        # helper window while starting, then hides it, and closing to the tray hides the main one.
+        if self.owner is None or not u.IsWindow(self.owner) or not (u.IsWindowVisible(self.owner) or u.IsIconic(self.owner)):
+            if self.owner is not None:
+                self.dismissed = None    # Claude was closed: ✕ lasts only until it's opened again
             for h in self.hooks:
                 u.UnhookWinEvent(h)
             self.hooks = []
