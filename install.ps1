@@ -57,9 +57,10 @@ $s.Description = 'Claude Recent Chats panel'
 $s.Save()
 Write-Host '[ok] Starts with Windows'
 
-# 6. Start it now.
-Start-Process -FilePath $pythonw -ArgumentList "`"$App`"" -WorkingDirectory $Dir
-Start-Sleep -Seconds 2
+# 6. Start it now, through Explorer (the startup shortcut), never as a child of this shell:
+#    when Claude runs this installer, anything this shell starts is closed when Claude quits.
+Start-Process -FilePath explorer.exe -ArgumentList "`"$Lnk`""
+Start-Sleep -Seconds 3
 $running = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | Where-Object { $_.CommandLine -like '*recent_chats.pyw*' }
 if (-not $running) { Fail ("The panel did not start. Run it by hand to see the error: python `"$App`"") }
 Write-Host '[ok] Running. Look at the left edge of your Claude window.' -ForegroundColor Green
