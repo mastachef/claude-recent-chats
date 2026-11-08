@@ -629,7 +629,21 @@ class Panel:
         u.SetWindowPos(self.hwnd, prev or 0, 0, 0, 0, 0, 0x13)
 
     def watch(self):
-        """Find the Claude window (again, if it was closed or restarted) and hook its moves."""
+        """Run _watch once a second, forever: an error inside it used to stop the loop for good,
+        leaving the panel hidden after Claude was force-closed by an update. Errors go to error.log."""
+        try:
+            self._watch()
+        except Exception:
+            import traceback
+            try:
+                with open(os.path.join(os.path.dirname(SETTINGS), 'error.log'), 'a', encoding='utf-8') as f:
+                    f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + traceback.format_exc() + '\n')
+            except OSError:
+                pass
+            self.owner = None    # start over: find the Claude window again next time
+        self.root.after(1000 if self.owner else 2000, self.watch)
+
+    def _watch(self):
         # Look again when the window is gone or hidden (not minimised): Claude briefly shows a
         # helper window while starting, then hides it, and closing to the tray hides the main one.
         if self.owner is None or not u.IsWindow(self.owner) or not (u.IsWindowVisible(self.owner) or u.IsIconic(self.owner)):
@@ -649,7 +663,6 @@ class Panel:
                 self.last_rect = None
         self.place()   # safety net in case an event was missed
         self.stack()
-        self.root.after(1000 if self.owner else 2000, self.watch)
 
     def place(self):
         """Snap to the left edge of the Claude window (only ever moves this panel)."""
