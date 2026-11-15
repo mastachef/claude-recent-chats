@@ -93,7 +93,6 @@ For the rest, change these at the top of `recent_chats.pyw`:
 
 ```python
 WIDTH = 270    # starting panel width at 100% display scaling
-SHOW = 40      # how many chats to list (pinned chats come on top of these)
 
 BG, ROW_HOVER, TEXT, DIM, ACCENT = '#1f1f1e', '#2c2c2a', '#e8e6e1', '#8f8d88', '#d97757'
 ```

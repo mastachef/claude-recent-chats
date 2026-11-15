@@ -13,7 +13,6 @@ import tkinter.font as tkfont
 
 WIDTH = 270           # starting panel width at 100% display scaling (drag the left edge to change)
 MIN_W, MAX_W = 180, 600
-SHOW = 40             # how many chats to list (pinned chats come on top of these)
 APPDATA = os.environ['APPDATA']
 # Width, condensed view and pins, saved as you change them.
 SETTINGS = os.path.join(os.environ.get('LOCALAPPDATA', APPDATA), 'ClaudeRecentChats', 'settings.json')
@@ -56,6 +55,15 @@ u.SetWinEventHook.argtypes = [w.DWORD, w.DWORD, w.HMODULE, WinEventProc, w.DWORD
 # Hook handles are 64-bit: without this, unhooking a big one raised OverflowError, which
 # stopped watch() for good and left the panel hidden after Claude restarted.
 u.UnhookWinEvent.argtypes = [w.HANDLE]
+k.OpenProcess.restype = w.HANDLE
+k.CloseHandle.argtypes = [w.HANDLE]
+k.QueryFullProcessImageNameW.argtypes = [w.HANDLE, w.DWORD, w.LPWSTR, ctypes.POINTER(w.DWORD)]
+
+# The Store version of Claude. Its own updater closes Claude to install an update, but Windows
+# refuses while any part of Claude is still running, so the update never lands and Claude just
+# stays closed (looks like a crash). update_watcher installs the waiting update once Claude is gone.
+CLAUDE_FAMILY = 'Claude_pzs8sxrjxfjjc'
+UPDATE_LOG = os.path.join(os.path.dirname(SETTINGS), 'update.log')
 
 
 def find_claude():
@@ -76,6 +84,59 @@ def find_claude():
 
     u.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, w.HWND, w.LPARAM)(cb), 0)
     return max(best)[1:] if best else (None, 0)
+
+
+def is_claude(pid):
+    """True if this process is part of the Store Claude app."""
+    hp = k.OpenProcess(0x1000, False, pid)
+    if not hp:
+        return False
+    exe = ctypes.create_unicode_buffer(520); sz = w.DWORD(520)
+    ok = k.QueryFullProcessImageNameW(hp, 0, exe, ctypes.byref(sz)); k.CloseHandle(hp)
+    return bool(ok) and '\\windowsapps\\claude_' in exe.value.lower()
+
+
+def claude_pids():
+    """Every running process of the Store Claude app (a full scan, ~0.2 s)."""
+    ids = (w.DWORD * 8192)(); got = w.DWORD()
+    k.K32EnumProcesses(ids, ctypes.sizeof(ids), ctypes.byref(got))
+    return {pid for pid in ids[:got.value // 4] if is_claude(pid)}
+
+
+def install_update():
+    """Install any update Windows has waiting for Claude; reopen Claude if the version changed."""
+    import subprocess
+    ps = ("$a=(Get-AppxPackage Claude).Version; "
+          f"try {{ Add-AppxPackage -RegisterByFamilyName -MainPackage {CLAUDE_FAMILY} -ErrorAction Stop; $r='ok' }} "
+          "catch { $r=$_.Exception.Message.Split([char]10)[0].Trim() }; "
+          "\"$a -> $((Get-AppxPackage Claude).Version) ($r)\"")
+    out = subprocess.run(['powershell', '-NoProfile', '-Command', ps], capture_output=True, text=True,
+                         creationflags=0x08000000).stdout.strip()   # CREATE_NO_WINDOW
+    before, _, after = out.partition(' -> ')
+    updated = bool(before) and not after.startswith(before + ' ')
+    try:
+        with open(UPDATE_LOG, 'a', encoding='utf-8') as f:
+            f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + out + (' reopened' if updated else '') + '\n')
+    except OSError:
+        pass
+    if updated:
+        os.startfile(f'shell:AppsFolder\\{CLAUDE_FAMILY}!Claude')
+
+
+def update_watcher():
+    """Each time Claude fully closes, install a waiting update (runs on its own thread)."""
+    pids = claude_pids()
+    while True:
+        time.sleep(2 if pids else 10)
+        if any(is_claude(p) for p in pids):
+            continue                 # still open: only the known processes were checked (cheap)
+        now = claude_pids()
+        if pids and not now:
+            try:
+                install_update()
+            except Exception:
+                pass
+        pids = now
 
 
 def groups_from(cfg):
@@ -486,7 +547,7 @@ class Panel:
         chats = self.chats.load()
         by_id = {c[1]: c for c in chats}
         pinned = [by_id[p] for p in self.pins if p in by_id]
-        rest = [c for c in chats if c[1] not in self.pins][:SHOW]
+        rest = [c for c in chats if c[1] not in self.pins]
         data = [(sid, title, f'{group or "Ungrouped"} · {ago(t)}', st, i < len(pinned))
                 for i, (t, sid, title, group, st) in enumerate(pinned + rest)]
         if data != self.data:
@@ -695,4 +756,5 @@ if __name__ == '__main__':
     elif '--install-hook' in sys.argv or '--remove-hook' in sys.argv:
         set_hook('--install-hook' in sys.argv)
     else:
+        threading.Thread(target=update_watcher, daemon=True).start()
         Panel().root.mainloop()
